@@ -29,7 +29,7 @@ export type channelMessageData = {
   } | null
 }
 
-export abstract class ConnectionBase<ClientType extends ClientBase<ChannelType>, ChannelType extends ChannelBase> {
+export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
   protected readonly clients = new Map<string, ClientType>();
   protected readonly middleware = new Map<string, (data: channelMessage) => any>()
 
@@ -62,9 +62,9 @@ export abstract class ConnectionBase<ClientType extends ClientBase<ChannelType>,
   }
 }
 
-export abstract class ClientBase<ChannelType extends ChannelBase> {
+export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, ChannelType extends ChannelBase<any,any>> {
   readonly id: string;
-  readonly conn: ConnectionBase<ClientBase<ChannelType>, ChannelType>;
+  readonly conn: ConnectionType;
   protected readonly channels = new Map<string, ChannelType>();
   // readonly sender = new Listener<"receive", string>;
   protected _routerId: string = null;
@@ -75,7 +75,7 @@ export abstract class ClientBase<ChannelType extends ChannelBase> {
 
   readonly listener = new Listener<"subclientadd", void>
 
-  constructor(id: string, connection: ConnectionBase<ClientBase<ChannelType>, ChannelType>) {
+  constructor(id: string, connection: ConnectionType) {
     this.id = id;
     this.conn = connection;
 
@@ -116,7 +116,7 @@ export abstract class ClientBase<ChannelType extends ChannelBase> {
     return this.channels.get(id);
   }
 
-  private onReceive(msg: string) {
+  protected onReceive(msg: string) {
     try {
       const message = JSON.parse(msg) as channelMessage;
 
@@ -291,7 +291,7 @@ export abstract class ClientBase<ChannelType extends ChannelBase> {
   }
 
   // returns router and client ids
-  static debug_getStructure<ChannelType extends ChannelBase>(client: ClientBase<ChannelType>) {
+  static debug_getStructure(client: ClientBase<any,any>) {
     const id = client.id;
     const clients = Object.keys(Object.fromEntries(client.subclientDist)).join(", ");
 
@@ -316,17 +316,17 @@ export abstract class ClientBase<ChannelType extends ChannelBase> {
   }
 }
 
-export abstract class ChannelBase {
+export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, ClientType extends ClientBase<any,any>> {
   protected readonly requestIds = new Ids();
   protected readonly requestResolves = new Map<number, (msg:channelMessageData) => void>();
   readonly id: string;
-  readonly client: ClientBase<ChannelBase>;
+  readonly client: ClientType;
 
   protected readonly sendQueue = new TimeoutQueue<[msg: string, recipientFunc: () => string]>(5000, (a,b) => a[0] === b[0] && a[1] === b[1] );
 
   readonly listener = new Listener<channelEvents, channelMessageData>();
 
-  constructor(id: string, client: ClientBase<ChannelBase>) {
+  constructor(id: string, client: ClientType) {
     this.id = id;
     this.client = client;
     this.client.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
