@@ -1,23 +1,36 @@
-import { ChannelBase, ClientBase, ConnectionBase, channelEvents, channelMessage, channelMessageData, channelSendTypes } from "./connBase";
-import { Ids } from "./ids";
-import { Listener } from "./listener";
-import { TimeoutQueue } from "./timeoutQueue";
+import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { Listener } from "../listener.js";
 
 export class LocalConnection extends ConnectionBase<LocalClient> {
   protected createNewClient(id: string): LocalClient { return new LocalClient(id,this); }
 }
 
 export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
-  readonly sender = new Listener<"receive", string>;
-  readonly listener = new Listener<"subclientadd", void>
-
   constructor(id: string, connection: LocalConnection) {
     super(id, connection);
 
-    this.sender.on("receive", this.onReceive.bind(this));
+    this.setReadyState(this.id, true)
   }
   
   createNewChannel(id: string): LocalChannel { return new LocalChannel(id, this); }
+
+  getClient(id: string) {
+    if (this.clients.has(id) || id == this._routerId) return this.conn.getClient(id);
+    return null;
+  }
+
+  async connectTo(id: string) {
+    const otherClient = this.conn.getClient(id);
+    if (!otherClient) return false;
+
+    otherClient.acceptConnection(this.id);
+    return true;
+  }
+
+  // TODO: make this do something...
+  async disconnectFrom(id: string) { return true; } // always assume success
+
+  acceptConnection(id: string) { this.setReadyState(id, true); }
 }
 
 export class LocalChannel extends ChannelBase<LocalConnection, LocalClient> {
@@ -29,7 +42,7 @@ export class LocalChannel extends ChannelBase<LocalConnection, LocalClient> {
     }
 
     setTimeout(() => { // emulate sending over data channel
-      recipient.sender.trigger("receive", msg);
+      recipient.listener.trigger("receive", msg);
     }, 100);
   }
 }

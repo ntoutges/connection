@@ -1,4 +1,4 @@
-import { LocalClient, LocalConnection } from "./conn.js";
+import { LocalClient, LocalConnection } from "./distros/local.js";
 
 const connection = new LocalConnection();
 

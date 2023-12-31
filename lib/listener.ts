@@ -116,15 +116,16 @@ export class Listener<Types, Data> {
   }
 
   trigger(type: Types, data: Data) {
-    if (!this.listeners.has(type)) return;
-    const listeners = (
-      Array.from(
-        this.listeners.get(type).entries()
-      ).sort(
-        (a,b) => this.priorities.get(b[0]) - this.priorities.get(a[0])
-      )
-    );
-    for (const listener of listeners) { listener[1](data); } // trigger standard listeners
+    if (this.listeners.has(type)) {
+      const listeners = (
+        Array.from(
+          this.listeners.get(type).entries()
+        ).sort(
+          (a,b) => this.priorities.get(b[0]) - this.priorities.get(a[0])
+        )
+      );
+      for (const listener of listeners) { listener[1](data); } // trigger standard listeners
+    }
     for (const listener of this.listenerAll.values()) { listener(type, data); } // trigger "all" listenerss
   }
 

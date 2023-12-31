@@ -1,9 +1,9 @@
-import { Ids } from "./ids";
-import { Listener } from "./listener";
-import { TimeoutQueue } from "./timeoutQueue";
+import { Ids } from "./ids.js";
+import { Listener } from "./listener.js";
+import { TimeoutQueue } from "./timeoutQueue.js";
 
-export type channelSendTypes = "send" | "request" | "response" | "control";
-export type channelEvents = "request" | "message" | "_control" | "_forward";
+export type channelSendTypes = "send" | "request" | "echo" | "response" | "control";
+export type channelEvents = "request" | "message" | "echoA" | "echoB" | "_control" | "_forward";
 export type channelMessage = {
   header: {
     id?: number
@@ -14,6 +14,7 @@ export type channelMessage = {
     }
     recipient?: string // id of recipient // leave empty to broadcast to all
     channel?: string
+    tags?: string // csv of tags that can indicate how to handle the message
   },
   data: string
 };
@@ -73,7 +74,9 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   readonly subclientDist = new Map<string, {dist: number, client: string}>();
   readonly dmChannel: ChannelType;
 
-  readonly listener = new Listener<"subclientadd", void>
+  readonly listener = new Listener<"subclientadd" | "readystatechange" | "receive", string>
+  private readonly readyStates = new Set<string>();
+  private _isReady: boolean = false;
 
   constructor(id: string, connection: ConnectionType) {
     this.id = id;
@@ -81,7 +84,18 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
 
     // this.sender.on("receive", this.onReceive.bind(this));
     this.dmChannel = this.buildChannel(`_${id}`);
+    this.listener.on("receive", this.onReceive.bind(this));
   }
+
+  protected setReadyState(id: string, isReady: boolean) {
+    const wasReady = this.readyStates.has(id);
+    if (isReady) this.readyStates.add(id);
+    else this.readyStates.delete(id);
+
+    // change occurred
+    if (wasReady != isReady) this.listener.trigger("readystatechange", id);
+  }
+  getReadyState(id: string) { return this.readyStates.has(id); }
 
   set routerId(routerId: string) {
     if (!routerId) { this._routerId = null; }
@@ -92,6 +106,10 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       this.dmChannel.sendControlMessage({
         disconnect: this.id
       });
+      const oldId = this._routerId;
+      this.disconnectFrom(oldId).then(success => {
+        if (success) this.setReadyState(routerId, false);
+      })
     }
 
     this._routerId = routerId;
@@ -105,10 +123,16 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
           subclients: Object.fromEntries(this.subclientDist)
         }
       });
+      this.connectTo(routerId).then(success => {
+        if (success) this.setReadyState(routerId, true);
+      });
     }
   }
   get routerId() { return this._routerId ?? null; }
   hasRouter() { return this._routerId != null; }
+  
+  abstract connectTo(id: string): Promise<boolean>;
+  abstract disconnectFrom(id: string): Promise<boolean>;
 
   abstract createNewChannel(id: string): ChannelType;
   buildChannel(id: string) {
@@ -135,6 +159,8 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
         res: null
       };
 
+      const tags: string[] = message?.header?.tags?.split(",") ?? [];
+
       switch (type) {
         case "control":
           try {
@@ -144,7 +170,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
           this.dmChannel.listener.trigger("_control", messageData);
           return;
         default:
-          if ("recipient" in message.header && message.header.recipient != "" && message.header.recipient != this.id) {
+          if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
             this.dmChannel.forward(message);
             this.dmChannel.listener.trigger("_forward", messageData);
             return;
@@ -164,11 +190,16 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
               send: channel.sendResponse.bind(channel, message)
             };
 
-            channel.listener.trigger("request", messageData);
+            if (!tags.includes("echo")) channel.listener.trigger("request", messageData); // only trigger if not echo request
+            else {
+              channel.listener.trigger("echoB", messageData);
+              channel.sendResponse(message, message.data);
+            }
           }
           break;
         case "response":
           channel.respond(messageData);
+          if (tags.includes("echo")) channel.listener.trigger("echoA", messageData);
           break;
         case "send":
           channel.listener.trigger("message", messageData);
@@ -244,7 +275,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
         }, header);
       }
 
-      if (didAdd) this.listener.trigger("subclientadd");
+      if (didAdd) this.listener.trigger("subclientadd", "");
   }
 
   protected recalculateMinDist() {
@@ -283,11 +314,6 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       if (pathArr.includes(clientId)) continue; // ignore anyone in send path
       this.dmChannel.sendRaw(message, clientId);
     }
-  }
-
-  getClient(id: string) {
-    if (this.clients.has(id) || id == this._routerId) return this.conn.getClient(id);
-    return null;
   }
 
   // returns router and client ids
@@ -330,6 +356,7 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     this.id = id;
     this.client = client;
     this.client.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
+    this.client.listener.on("readystatechange", this.onReadyStateChange.bind(this));
   }
 
   protected abstract doSend(msg: string, recipientId: string): void;
@@ -341,13 +368,17 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
       this.sendToClients(header, data);
       return;
     }
-
+    
     if (!("recipient" in header) || header.recipient != null) header.recipient = finalRecipientId; // set recipientId
     
     const recipientId = this.client.getSendClient(finalRecipientId);
 
     const msg = this.constructMessageString(header, data);
-    if (recipientId === null) { // finalRecipient cannot be reached
+    if (
+      !this.client.getReadyState(this.client.id) // client not yet ready to send
+      || recipientId === null // finalRecipient cannot be reached
+      || !this.client.getReadyState(recipientId) // client cannot yet communicate with 'recipientId'
+    ) {
       this.sendQueue.add([msg, this.client.getSendClient.bind(this.client, finalRecipientId)]); // undefined recipientId indicates to queue that value needs to be generated based on 
       return;
     }
@@ -429,12 +460,22 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
 
   request(data: string, finalRecipientId: string) {
     return new Promise<channelMessageData>((resolve, reject) => {
-      const id = this.requestIds.generateId();
-      
+      const id = this.initRequest(resolve);
       this.doSendTo({ type: "request", id }, data, finalRecipientId);
-      
-      this.requestResolves.set(id, resolve);
     });
+  }
+
+  echo(data: string, finalRecipientId: string) {
+    return new Promise<channelMessageData>((resolve, reject) => {
+      const id = this.initRequest(resolve);
+      this.doSendTo({ type: "request", id, tags: "echo" }, data, finalRecipientId);
+    });
+  }
+
+  private initRequest(resolve: (value: channelMessageData) => void) {
+    const id = this.requestIds.generateId();
+    this.requestResolves.set(id, resolve);
+    return id;
   }
 
   respond(message: channelMessageData) {
@@ -442,6 +483,7 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     
     const id = message.req.header.id;
     if (!this.requestIds.isInUse(id)) return; // id not in use
+    this.requestIds.releaseId(id);
 
     this.requestResolves.get(id).call(this, message);
     this.requestResolves.delete(id);
@@ -449,17 +491,30 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
 
   sendResponse(message: channelMessage, data: string) {
     const finalRecipient = message.header.sender.origin;
-    this.doSendTo({ type: "response", id: message.header.id }, data, finalRecipient);
+    const tags = message.header.tags ?? "";
+    this.doSendTo({ type: "response", id: message.header.id, tags }, data, finalRecipient);
   }
 
   private attemptEmptySendQueue() {
+    const toDelete: [msg: string, recipientFunc: () => string][] = [];
     this.sendQueue.forEach(([msg, recipientFunc]) => {
       const recipientId = recipientFunc();
-      if (recipientId == null) return; // invalid id, so try again later
+      if (
+        recipientId == null // invalid id
+        || !this.client.getReadyState(recipientId) // client connection not yet ready
+      ) return; // try again later
 
       // id is assumed valid
-      this.sendQueue.delete([msg,recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
+      toDelete.push([msg,recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
       this.doSend(msg, recipientId); // TODO: fix [recipientId] being undefined
     });
+
+    for (const item of toDelete) { this.sendQueue.delete(item); }
+  }
+
+  private onReadyStateChange(id: string) {
+    if (this.client.getReadyState(id)) { // ready state set to true
+      this.attemptEmptySendQueue();
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { Listener } from "./listener";
+import { Listener } from "./listener.js";
 
 // push items into this set, and after [timeout] time, they will remove themselves on their own
 export class TimeoutQueue<Type> {

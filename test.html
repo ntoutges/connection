@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Connection Channel Test</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <style>
+      body {
+        margin: 8px;
+        background: cornsilk;
+      }
+      #conn {
+        display: flex;
+        gap: 10px;
+        height: calc(100vh - 16px);
+      }
+      #conn > div {
+        flex: 1 1 0px;
+        padding: 5px;
+
+        position: relative;
+      }
+      #send {
+        background-color: orange;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      #submit {
+        display: block;
+      }
+      #dataOut {
+        flex-grow: 1;
+        padding: 2px;
+        border-width: 1px;
+        width: calc(100% - 6px);
+        resize: none;
+        background: #bababaaa;
+      }
+      #dataOut:focus {
+        background: #bababadd;
+      }
+      
+      #receive {
+        background-color: lightgreen;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+
+        overflow-y: auto;
+      }
+      .messages {
+        font-family: math;
+        padding: 2px;
+        background-color: #b4ffff7a;
+        border-radius: 5px;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="conn">
+      <div id="send">
+        <textarea id="dataOut"></textarea>
+        <button id="submit">Send!</button>
+      </div>
+      <div id="receive">
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script type="module" defer>
+      import { LocalConnection } from "./src/distros/local.js";
+      import { PeerConnection } from "./src/distros/peer.js";
+      
+      const args = window.location.search.substring(1).split("&");
+      const myId = args[0] ?? "";
+      const routerId = args[1] ?? "";
+
+      
+      
+      // const conn = new LocalConnection();
+      const conn = new PeerConnection(Peer, "testpeer-");
+
+      // const router = conn.buildClient(routerId);
+      // const channel2 = router.buildChannel("test");
+
+      const client = conn.buildClient(myId)
+      const channel = client.buildChannel("test");
+      
+
+
+      if (routerId) client.routerId = routerId;
+
+      channel.listener.onAll((type, {req,res}) => { addMessage(req); })
+      client.dmChannel.listener.onAll((type, {req,res}) => { addMessage(req); })
+
+      document.getElementById("submit").addEventListener("click", () => {
+        const data = document.getElementById("dataOut").value;
+        channel.echo(data, routerId);
+      });
+
+      document.getElementById("dataOut").addEventListener("keydown", e => {
+        if (e.ctrlKey && e.key == "Enter") { document.getElementById("submit").click(); }
+      });
+
+      function addMessage(req) {
+        const el = document.createElement("div");
+        el.classList.add("messages");
+        
+        const data = document.createElement("b");
+        data.innerText = req.data;
+        el.append(data);
+
+        const header = document.createElement("div");
+        header.innerText = JSON.stringify(req.header);
+        el.append(header);
+
+        document.getElementById("receive").prepend(el)
+      }
+    </script>
+  </body>
+</html>
