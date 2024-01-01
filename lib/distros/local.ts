@@ -2,12 +2,12 @@ import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
 import { Listener } from "../listener.js";
 
 export class LocalConnection extends ConnectionBase<LocalClient> {
-  protected createNewClient(id: string): LocalClient { return new LocalClient(id,this); }
+  protected createNewClient(id: string, heartbeatInterval: number): LocalClient { return new LocalClient(id,this, heartbeatInterval); }
 }
 
 export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
-  constructor(id: string, connection: LocalConnection) {
-    super(id, connection);
+  constructor(id: string, connection: LocalConnection, heartbeatInterval: number) {
+    super(id, connection, heartbeatInterval);
 
     this.setReadyState(this.id, true)
   }

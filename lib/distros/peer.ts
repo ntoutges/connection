@@ -10,7 +10,7 @@ export class PeerConnection extends ConnectionBase<PeerClient> {
     this.prefix = prefix;
   }
 
-  protected createNewClient(id: string): PeerClient { return new PeerClient(id,this); }
+  protected createNewClient(id: string, heartbeatInterval: number): PeerClient { return new PeerClient(id,this,heartbeatInterval); }
 
   getFullId(id: string) { return this.prefix + id; }
   getLocalId(id: string) { return id.replace(this.prefix, ""); } // strip prefix
@@ -21,8 +21,8 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   private waitingForPeerOpen: () => void = null;
   private readonly conns = new Map<string,any>(); // maps between client id and peerjs.conn object
 
-  constructor(id: string, connection: PeerConnection) {
-    super(id, connection);
+  constructor(id: string, connection: PeerConnection, heartbeatInterval: number) {
+    super(id, connection,heartbeatInterval);
 
     this.peer = new connection.Peer(this.fullId);
 

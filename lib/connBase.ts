@@ -2,6 +2,7 @@ import { Ids } from "./ids.js";
 import { Listener } from "./listener.js";
 import { TimeoutQueue } from "./timeoutQueue.js";
 
+export type clientEvents = "subclientadd" | "readystatechange" | "receive" | "connect" | "disconnect";
 export type channelSendTypes = "send" | "request" | "echo" | "response" | "control";
 export type channelEvents = "request" | "message" | "echoA" | "echoB" | "_control" | "_forward";
 export type channelMessage = {
@@ -34,10 +35,10 @@ export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
   protected readonly clients = new Map<string, ClientType>();
   protected readonly middleware = new Map<string, (data: channelMessage) => any>()
 
-  protected abstract createNewClient(id: string): ClientType;
+  protected abstract createNewClient(id: string, heartbeatInterval: number): ClientType;
   
-  buildClient(id: string): ClientType {
-    if (!this.clients.has(id)) this.clients.set(id, this.createNewClient(id));
+  buildClient(id: string, heartbeatInterval:number=1000): ClientType {
+    if (!this.clients.has(id)) this.clients.set(id, this.createNewClient(id, heartbeatInterval));
     return this.clients.get(id);
   }
   getClient(id: string) {
@@ -74,23 +75,32 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   readonly subclientDist = new Map<string, {dist: number, client: string}>();
   readonly dmChannel: ChannelType;
 
-  readonly listener = new Listener<"subclientadd" | "readystatechange" | "receive", string>
+  readonly listener = new Listener<clientEvents, string>
   private readonly readyStates = new Set<string>();
-  private _isReady: boolean = false;
 
-  constructor(id: string, connection: ConnectionType) {
+  constructor(id: string, connection: ConnectionType, heartbeatInterval: number) {
     this.id = id;
     this.conn = connection;
 
     // this.sender.on("receive", this.onReceive.bind(this));
     this.dmChannel = this.buildChannel(`_${id}`);
     this.listener.on("receive", this.onReceive.bind(this));
+
+    if (heartbeatInterval > 0) { // only send heartbeat if non-zero
+      setInterval(this.sendHeartbeat.bind(this), heartbeatInterval);
+    }
   }
 
   protected setReadyState(id: string, isReady: boolean) {
     const wasReady = this.readyStates.has(id);
-    if (isReady) this.readyStates.add(id);
-    else this.readyStates.delete(id);
+    if (isReady) { // connection created
+      this.readyStates.add(id);
+      this.listener.trigger("connect", id);
+    }
+    else { // connection destroyed
+      this.readyStates.delete(id);
+      this.listener.trigger("disconnect", id);
+    }
 
     // change occurred
     if (wasReady != isReady) this.listener.trigger("readystatechange", id);
@@ -308,11 +318,11 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     if (!Array.isArray(pathArr)) pathArr = []; // reset to empty array if not array
 
     if (this._routerId && !pathArr.includes(this._routerId)) {
-      this.dmChannel.sendRaw(message, this._routerId);
+      this.dmChannel.forward(message);
     }
     for (const [clientId, subClients] of this.clients) {
       if (pathArr.includes(clientId)) continue; // ignore anyone in send path
-      this.dmChannel.sendRaw(message, clientId);
+      this.dmChannel.forward(message);
     }
   }
 
@@ -340,6 +350,14 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     }
     return this.routerId; // DISCOVERY; B -> A -> C
   }
+
+  private sendHeartbeat() {
+    console.log("heartbeat send");
+    if (this.routerId) this.dmChannel.sendHeartbeat(this.routerId); // alert router (if it exists) that this client is still responsive
+    for (const [clientId, subclients] of this.clients) {
+      this.dmChannel.sendHeartbeat(clientId); // alert clients that router still exists
+    }
+  }
 }
 
 export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, ClientType extends ClientBase<any,any>> {
@@ -357,6 +375,29 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     this.client = client;
     this.client.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
     this.client.listener.on("readystatechange", this.onReadyStateChange.bind(this));
+  }
+
+  broadcast(data: string, tags: string = "") { // tags in the form of csv
+    this.doSendTo({ type: "send", recipient: null }, data, null);
+  }
+
+  sendTo(data: string, finalRecipientId: string, tags: string = "") { // tags in the form of csv
+    this.doSendTo({ type: "send", tags }, data, finalRecipientId);
+  }
+
+  request(data: string, finalRecipientId: string, tags: string = "") { // tags in the form of csv
+    return new Promise<channelMessageData>((resolve, reject) => {
+      const id = this.initRequest(resolve);
+      this.doSendTo({ type: "request", id, tags }, data, finalRecipientId);
+    });
+  }
+
+  sendHeartbeat(finalRecipientId: string) { 
+    this.sendTo("", finalRecipientId, "hb");
+  }
+
+  echo(data: string, finalRecipientId: string) {
+    return this.request(data, finalRecipientId, "echo");
   }
 
   protected abstract doSend(msg: string, recipientId: string): void;
@@ -438,38 +479,12 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     this.doForwardTo(message.header, message.data, message.header.recipient);
   }
 
-  sendRaw(message: channelMessage, recipientId?: string) {
-    this.doSendTo(message.header, message.data, recipientId);
-  }
-
   sendControlMessage(data: Record<string, any>, lastHeader?: channelMessage["header"]) {
     const header = lastHeader ?? {} as channelMessage["header"];
     header.type = "control";
 
     if (!lastHeader) this.doSendTo(header, JSON.stringify(data), this.client.routerId ?? undefined);
     else this.doForwardTo(header, JSON.stringify(data), this.client.routerId ?? undefined);
-  }
-
-  broadcast(data: string) {
-    this.doSendTo({ type: "send", recipient: null }, data, null);
-  }
-
-  sendTo(data: string, finalRecipientId: string) {
-    this.doSendTo({ type: "send" }, data, finalRecipientId);
-  }
-
-  request(data: string, finalRecipientId: string) {
-    return new Promise<channelMessageData>((resolve, reject) => {
-      const id = this.initRequest(resolve);
-      this.doSendTo({ type: "request", id }, data, finalRecipientId);
-    });
-  }
-
-  echo(data: string, finalRecipientId: string) {
-    return new Promise<channelMessageData>((resolve, reject) => {
-      const id = this.initRequest(resolve);
-      this.doSendTo({ type: "request", id, tags: "echo" }, data, finalRecipientId);
-    });
   }
 
   private initRequest(resolve: (value: channelMessageData) => void) {
