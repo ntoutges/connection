@@ -4,19 +4,19 @@ export class SmartInterval {
   private iId: number = null;
   private tId: number = null;
   private _isPaused: boolean = false;
-  private lastTick: number = null;
+  private lastTick: number = (new Date()).getTime();
   constructor(
     callback: () => void,
     interval: number = 0, // default case -- means will not run
     runImmediate: boolean = false // if false: will set wait [interval] seconds before sending first callback. if true: will callback immediately
   ) {
     this.setCallback(callback);
-    this.setInterval(interval);
+    this.interval = interval;
 
     if (runImmediate) this.callback();
   }
-  
-  setInterval(interval: number) {
+
+  set interval(interval: number) {
     const oldInterval = this.timeout;
     this.timeout = interval;
 
@@ -24,18 +24,23 @@ export class SmartInterval {
       this.createInterval();
     }
   }
+  get interval() { return this.timeout; }
 
   setCallback(callback: () => void) {
     this.callback = callback;
   }
 
   pause() {
-    clearInterval(this.iId);
+    if (this._isPaused) return; // already is paused
+    if (this.iId) clearInterval(this.iId);
+    if (this.tId) clearTimeout(this.tId);
     this.iId = null;
+    this.tId = null;
     this._isPaused = true;
   }
 
   play() {
+    if (!this._isPaused) return; // already is playing
     this.createInterval();
     this._isPaused = false;
   }
