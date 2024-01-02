@@ -1,5 +1,6 @@
 import { LocalClient, LocalConnection } from "./distros/local.js";
 import { SmartInterval } from "./smartInterval.js";
+import { SmartTimeout } from "./smartTimeout.js";
 
 const connection = new LocalConnection();
 
@@ -26,16 +27,15 @@ connection.addMiddleware("json", (message) => {
 //   console.log(LocalClient.debug_getStructure(clientC));
 // }, 100)
 
-var i = 0;
 console.log("start")
-const interval = new SmartInterval(() => {
-  console.log("interval:", ++i);
+const start = (new Date()).getTime();
+const timeout = new SmartTimeout(() => {
+  const now = (new Date()).getTime();
+  console.log(`expired after ${now-start}ms`);
+}, 1000);
 
-  if (i == 3) {
-    interval.pause();
-    setTimeout(() => {
-      interval.resetCycle();
-      console.log("interval: 3.5");
-    }, 500)
-  }
-}, 1000, true);
+setTimeout(() => {
+  timeout.timeout = 1000;
+  timeout.restart();
+  console.log("restart");
+}, 1500)

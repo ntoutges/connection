@@ -1,8 +1,10 @@
 import { Ids } from "./ids.js";
 import { Listener } from "./listener.js";
+import { SmartInterval } from "./smartInterval.js";
+import { SmartTimeout } from "./smartTimeout.js";
 import { TimeoutQueue } from "./timeoutQueue.js";
 
-export type clientEvents = "subclientadd" | "readystatechange" | "receive" | "connect" | "disconnect";
+export type clientEvents = "subclientadd" | "readystatechange" | "receive" | "connect" | "disconnect" | "reconnect";
 export type channelSendTypes = "send" | "request" | "echo" | "response" | "control";
 export type channelEvents = "request" | "message" | "echoA" | "echoB" | "_control" | "_forward";
 export type channelMessage = {
@@ -72,11 +74,16 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   protected _routerId: string = null;
   
   readonly clients = new Map<string, Map<string, number>>();
+  private hasBlockedReconnect: boolean = false;
   readonly subclientDist = new Map<string, {dist: number, client: string}>();
+  readonly clientHeartbeats = new Map<string, SmartTimeout>(); // being in this list implies the heartbeat is active
+  
   readonly dmChannel: ChannelType;
 
   readonly listener = new Listener<clientEvents, string>
   private readonly readyStates = new Set<string>();
+
+  readonly hbInterval: SmartInterval;
 
   constructor(id: string, connection: ConnectionType, heartbeatInterval: number) {
     this.id = id;
@@ -86,24 +93,39 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     this.dmChannel = this.buildChannel(`_${id}`);
     this.listener.on("receive", this.onReceive.bind(this));
 
-    if (heartbeatInterval > 0) { // only send heartbeat if non-zero
-      setInterval(this.sendHeartbeat.bind(this), heartbeatInterval);
-    }
+    this.hbInterval = new SmartInterval(this.sendHeartbeat.bind(this), heartbeatInterval);
+    this.hbInterval.pause(); // don't run until ready
+
+    this.listener.on("readystatechange", (id) => {
+      if (id == this.id) {
+        if (this.getReadyState(id)) this.hbInterval.play(); // ready, so start hb interval
+        else this.hbInterval.pause(); // not ready, so do nothing
+      }
+    });
+
+    this.listener.on("connect", (id) => {
+      this.dmChannel.sendControlMessage({
+        hb: {
+          id: this.id,
+          interval: this.hbInterval.interval
+        }
+      }, id); // send control message to all
+    });
   }
 
   protected setReadyState(id: string, isReady: boolean) {
     const wasReady = this.readyStates.has(id);
+    if (wasReady == isReady) return; // no change occurred
     if (isReady) { // connection created
       this.readyStates.add(id);
-      this.listener.trigger("connect", id);
+      if (id != this.id) this.listener.trigger("connect", id);
     }
     else { // connection destroyed
       this.readyStates.delete(id);
-      this.listener.trigger("disconnect", id);
+      if (id != this.id) this.listener.trigger("disconnect", id);
     }
 
-    // change occurred
-    if (wasReady != isReady) this.listener.trigger("readystatechange", id);
+    this.listener.trigger("readystatechange", id);
   }
   getReadyState(id: string) { return this.readyStates.has(id); }
 
@@ -170,6 +192,10 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       };
 
       const tags: string[] = message?.header?.tags?.split(",") ?? [];
+      const origin = message.header.sender?.origin ?? null;
+      if (origin != null) {
+        this.resetHeartbeat(origin);
+      }
 
       switch (type) {
         case "control":
@@ -179,15 +205,18 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
           catch(err) {} // catch error to not stop program because of malformed message
           this.dmChannel.listener.trigger("_control", messageData);
           return;
-        default:
-          if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
-            this.dmChannel.forward(message);
-            this.dmChannel.listener.trigger("_forward", messageData);
-            return;
-          }
+        case "send":
+          if (tags.includes("hb")) return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
           break;
       }
       
+      // forward to someone who probably knows the final recipient
+      if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
+        this.dmChannel.forward(message);
+        this.dmChannel.listener.trigger("_forward", messageData);
+        return;
+      }
+
       if (!this.channels.has(channelId)) return; // invalid channel (when it matters)
 
       const channel = this.channels.get(channelId);
@@ -231,11 +260,63 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       this.handleSubclientDiscovery(control, header);
     }
 
-    if ("disconnect" in control) {
-      const id = control.disconnect;
-      if (this.clients.has(id)) this.clients.delete(id);
-      this.recalculateMinDist();
+    if (
+      "hb" in control
+      && "id" in control.hb
+      && "interval" in control.hb
+    ) {
+      const id = String(control.hb.id); // stringify in case not already
+      let interval = parseInt(control.hb.interval) ?? 0;
+      
+      if (Number.isNaN(interval)) interval = 0;
+
+      interval *= 3; // allow 3 missed messages before heartbeat declared dead
+
+      if (!this.clientHeartbeats.has(id)) this.clientHeartbeats.set(id, new SmartTimeout(this.doDisconnect.bind(this,id), interval)); // create new entry
+      else this.clientHeartbeats.get(id).timeout = interval; // update existing entry
     }
+
+    if (
+      "disconnect" in control
+      && "id" in control.disconnect
+    ) {
+      const id = String(control.disconnect.id); // stringify in case not already
+      this.doDisconnect(id);
+    }
+  }
+
+  private doDisconnect(id: string) {
+    this.killHeartbeat(id);
+    this.clients.delete(id);
+    this.recalculateMinDist();
+    
+    // NOTE: only try to reconnect to routers, clients will try automatically try to reconnect
+    // diagram: A -> B
+    // if [A] disconnects, both [A] and [B] will get a disconnect, so only [A] will need to try and reconnect
+    if (id == this._routerId) {
+      this.routerId = null;
+
+      this.listener.trigger("reconnect", id);
+      if (this.hasBlockedReconnect) { // don't do reconnect
+        this.hasBlockedReconnect = false; // reset value
+        return;
+      }
+
+      // attempt reconnect
+      this.routerId = id;
+    }
+    else { // manual disconnect
+      this.disconnectFrom(id);
+      this.setReadyState(id, false); // also triggers disconnect event3
+    }
+  }
+
+  /**
+   * Call this function when the "reconnect" event fired, to prevent reconnect process
+   * This does nothing, otherwise
+   */
+  blockReconnect() {
+    this.hasBlockedReconnect = true;
   }
 
   private handleSubclientDiscovery(control: Record<string, any>, header: channelMessage["header"]) {
@@ -282,7 +363,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
             mode: mode,
             subclients: forwardedSubclients
           }
-        }, header);
+        }, null, header);
       }
 
       if (didAdd) this.listener.trigger("subclientadd", "");
@@ -352,10 +433,20 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   }
 
   private sendHeartbeat() {
-    console.log("heartbeat send");
     if (this.routerId) this.dmChannel.sendHeartbeat(this.routerId); // alert router (if it exists) that this client is still responsive
     for (const [clientId, subclients] of this.clients) {
       this.dmChannel.sendHeartbeat(clientId); // alert clients that router still exists
+    }
+  }
+
+  private resetHeartbeat(id: string) {
+    this.clientHeartbeats.get(id)?.restart();
+  }
+
+  private killHeartbeat(id: string) {
+    if (this.clientHeartbeats.has(id)) {
+      this.clientHeartbeats.get(id).pause(); // stop timoeut
+      this.clientHeartbeats.delete(id);
     }
   }
 }
@@ -392,7 +483,7 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     });
   }
 
-  sendHeartbeat(finalRecipientId: string) { 
+  sendHeartbeat(finalRecipientId: string) {
     this.sendTo("", finalRecipientId, "hb");
   }
 
@@ -479,12 +570,17 @@ export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, Cl
     this.doForwardTo(message.header, message.data, message.header.recipient);
   }
 
-  sendControlMessage(data: Record<string, any>, lastHeader?: channelMessage["header"]) {
+  sendControlMessage(data: Record<string, any>, finalRecipientId:string=null, lastHeader?: channelMessage["header"]) {
+    if (finalRecipientId === null) { 
+      finalRecipientId = this.client.routerId; // invalid id, so try router
+      if (finalRecipientId === null) return; // router doesn't exist, so give up
+    }
+
     const header = lastHeader ?? {} as channelMessage["header"];
     header.type = "control";
-
-    if (!lastHeader) this.doSendTo(header, JSON.stringify(data), this.client.routerId ?? undefined);
-    else this.doForwardTo(header, JSON.stringify(data), this.client.routerId ?? undefined);
+    
+    if (!lastHeader) this.doSendTo(header, JSON.stringify(data), finalRecipientId);
+    else this.doForwardTo(header, JSON.stringify(data), finalRecipientId);
   }
 
   private initRequest(resolve: (value: channelMessageData) => void) {

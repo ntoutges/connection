@@ -84,10 +84,20 @@
       // const router = conn.buildClient(routerId);
       // const channel2 = router.buildChannel("test");
 
-      const client = conn.buildClient(myId)
+      const client = conn.buildClient(myId, 500)
       const channel = client.buildChannel("test");
       
+      client.listener.on("connect", (id) => {
+        console.log(`${id} has connected`);
+      })
 
+      client.listener.on("disconnect", (id) => {
+        console.log(`${id} has disconnected!`)
+      })
+
+      client.listener.on("reconnect", (id) => {
+        console.log(`${id} is reconnecting`);
+      })
 
       if (routerId) client.routerId = routerId;
 

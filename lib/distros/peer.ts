@@ -83,8 +83,11 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   }
 
   async disconnectFrom(id: string) {
-    
-    return true;
+    if (this.conns.has(id)) {
+      this.conns.get(id).close();
+      this.conns.delete(id);
+    }
+    else return false; // error occurred
   }
 
   get fullId() { return this.conn.getFullId(this.id); }
