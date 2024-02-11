@@ -33,7 +33,7 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   acceptConnection(id: string) { this.setReadyState(id, true); }
 }
 
-export class LocalChannel extends ChannelBase<LocalConnection, LocalClient> {
+export class LocalChannel extends ChannelBase<LocalClient> {
   protected doSend(msg: string, recipientId: string) {
     const recipient = this.client.getClient(recipientId)
     if (!recipient) { // no one to send to, so push to queue
