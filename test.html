@@ -88,15 +88,15 @@
       const channel = client.buildChannel("test");
       
       client.listener.on("connect", (id) => {
-        console.log(`${id} has connected`);
+        console.log(`${client.id} has connected to ${id}`);
       })
 
       client.listener.on("disconnect", (id) => {
-        console.log(`${id} has disconnected!`)
+        console.log(`${client.id} has disconnected from ${id}!`)
       })
 
       client.listener.on("reconnect", (id) => {
-        console.log(`${id} is reconnecting`);
+        console.log(`${client.id} is reconnecting to ${id}`);
       })
 
       if (routerId) client.routerId = routerId;
@@ -118,7 +118,7 @@
         el.classList.add("messages");
         
         const data = document.createElement("b");
-        data.innerText = req.data;
+        data.innerText = req.data.replace(/\n/g, "\\n");
         el.append(data);
 
         const header = document.createElement("div");

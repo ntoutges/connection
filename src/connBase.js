@@ -38,11 +38,13 @@ export class ClientBase {
     // readonly sender = new Listener<"receive", string>;
     _routerId = null;
     clients = new Map();
+    onConnectCallback = null;
     hasBlockedReconnect = false;
     subclientDist = new Map();
     clientHeartbeats = new Map(); // being in this list implies the heartbeat is active
     dmChannel;
-    listener = new Listener;
+    listener = new Listener();
+    errListener = new Listener();
     readyStates = new Set();
     hbInterval;
     constructor(id, connection, heartbeatInterval) {
@@ -62,13 +64,26 @@ export class ClientBase {
             }
         });
         this.listener.on("connect", (id) => {
-            this.dmChannel.sendControlMessage({
-                hb: {
-                    id: this.id,
-                    interval: this.hbInterval.interval
-                }
-            }, id); // send control message to all
+            setTimeout(() => {
+                this.dmChannel.sendControlMessage({
+                    hb: {
+                        id: this.id,
+                        interval: this.hbInterval.interval
+                    }
+                }, id); // send control message to all
+            }, 1000); // need to figure out why this is needed...
         });
+        // no success
+        this.errListener.on("unavailable", () => {
+            if (this.onConnectCallback)
+                this.onConnectCallback(false);
+        });
+    }
+    // if isReady == this.readyStates.has(id), set this.readyState... to !isReady, then back to isReady
+    toggleReadyStateTo(id, isReady) {
+        if (this.getReadyState(id) == isReady)
+            this.setReadyState(id, !isReady);
+        this.setReadyState(id, isReady);
     }
     setReadyState(id, isReady, doTriggerEvent = true) {
         const wasReady = this.readyStates.has(id);
@@ -96,9 +111,8 @@ export class ClientBase {
                 disconnect: this.id
             });
             const oldId = this._routerId;
-            this.disconnectFrom(oldId).then(success => {
-                this.setReadyState(oldId, false, false); // no matter what, treat as disconnected (if fail, likely already disconnected)
-            });
+            this.setReadyState(oldId, false, false); // no matter what, treat as disconnected (if fail, likely already disconnected)
+            this.disconnectFrom(oldId).then(() => { });
         }
         this._routerId = routerId;
         // tell new router about this router's connections
@@ -110,16 +124,22 @@ export class ClientBase {
                     subclients: Object.fromEntries(this.subclientDist)
                 }
             });
-            this.connectTo(routerId).then(success => {
-                if (success)
-                    this.setReadyState(routerId, true);
-                else
-                    console.log("failed to connect");
-            });
+            if (this.onConnectCallback)
+                this.onConnectCallback(false); // indicate that previous conenction was unsuccessful
+            this.onConnectCallback = this.onConnect.bind(this, routerId);
+            this.connectTo(routerId, this.onConnectCallback);
         }
     }
     get routerId() { return this._routerId ?? null; }
     hasRouter() { return this._routerId != null; }
+    onConnect(routerId, success) {
+        this.onConnectCallback = null;
+        if (success)
+            this.setReadyState(routerId, true);
+        else {
+            setTimeout(this.doDisconnect.bind(this, routerId), 1000);
+        }
+    }
     buildChannel(id) {
         if (!this.channels.has(id))
             this.channels.set(id, this.createNewChannel(id));
@@ -308,18 +328,17 @@ export class ClientBase {
             this.listener.trigger("subclientadd", "");
     }
     recalculateMinDist() {
-        const subclientMinDist = this.subclientDist;
-        subclientMinDist.clear();
+        this.subclientDist.clear();
         for (const [clientId, subclients] of this.clients) {
-            subclientMinDist.set(clientId, { dist: 1, client: clientId }); // add in direct clients
+            this.subclientDist.set(clientId, { dist: 1, client: clientId }); // add in direct clients
             // add in subclients
             for (const [subclientId, distance] of subclients) {
-                if (!subclientMinDist.has(subclientId))
-                    subclientMinDist.set(subclientId, { client: clientId, dist: distance });
+                if (!this.subclientDist.has(subclientId))
+                    this.subclientDist.set(subclientId, { client: clientId, dist: distance });
                 else {
-                    const oldDist = subclientMinDist.get(subclientId).dist;
+                    const oldDist = this.subclientDist.get(subclientId).dist;
                     if (oldDist < distance) { // new distance is lesser
-                        subclientMinDist.set(subclientId, { dist: distance, client: clientId });
+                        this.subclientDist.set(subclientId, { dist: distance, client: clientId });
                     }
                 }
             }

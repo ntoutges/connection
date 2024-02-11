@@ -5,6 +5,7 @@ import { SmartTimeout } from "./smartTimeout.js";
 import { TimeoutQueue } from "./timeoutQueue.js";
 
 export type clientEvents = "subclientadd" | "readystatechange" | "receive" | "connect" | "disconnect" | "reconnect";
+export type errEvents = "connection" | "unavailable" | "id";
 export type channelSendTypes = "send" | "request" | "echo" | "response" | "control";
 export type channelEvents = "request" | "message" | "echoA" | "echoB" | "_control" | "_forward";
 export type channelMessage = {
@@ -74,13 +75,16 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   protected _routerId: string = null;
   
   readonly clients = new Map<string, Map<string, number>>();
+  private onConnectCallback: (success: boolean) => void = null;
+
   private hasBlockedReconnect: boolean = false;
   readonly subclientDist = new Map<string, {dist: number, client: string}>();
   readonly clientHeartbeats = new Map<string, SmartTimeout>(); // being in this list implies the heartbeat is active
   
   readonly dmChannel: ChannelType;
 
-  readonly listener = new Listener<clientEvents, string>
+  readonly listener = new Listener<clientEvents, string>();
+  readonly errListener = new Listener<errEvents, { type: string, message: string }>();
   private readonly readyStates = new Set<string>();
 
   readonly hbInterval: SmartInterval;
@@ -104,13 +108,26 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     });
 
     this.listener.on("connect", (id) => {
-      this.dmChannel.sendControlMessage({
-        hb: {
-          id: this.id,
-          interval: this.hbInterval.interval
-        }
-      }, id); // send control message to all
+      setTimeout(() => {
+        this.dmChannel.sendControlMessage({
+          hb: {
+            id: this.id,
+            interval: this.hbInterval.interval
+          }
+        }, id); // send control message to all
+      }, 1000); // need to figure out why this is needed...
     });
+
+    // no success
+    this.errListener.on("unavailable", () => {
+      if (this.onConnectCallback) this.onConnectCallback(false);
+    });
+  }
+
+  // if isReady == this.readyStates.has(id), set this.readyState... to !isReady, then back to isReady
+  protected toggleReadyStateTo(id: string, isReady: boolean) {
+    if (this.getReadyState(id) == isReady) this.setReadyState(id, !isReady);
+    this.setReadyState(id, isReady);
   }
 
   protected setReadyState(id: string, isReady: boolean, doTriggerEvent: boolean = true) {
@@ -138,9 +155,8 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
         disconnect: this.id
       });
       const oldId = this._routerId;
-      this.disconnectFrom(oldId).then(success => {
-        this.setReadyState(oldId, false, false); // no matter what, treat as disconnected (if fail, likely already disconnected)
-      })
+      this.setReadyState(oldId, false, false); // no matter what, treat as disconnected (if fail, likely already disconnected)
+      this.disconnectFrom(oldId).then(() => {})
     }
 
     this._routerId = routerId;
@@ -154,16 +170,24 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
           subclients: Object.fromEntries(this.subclientDist)
         }
       });
-      this.connectTo(routerId).then(success => {
-        if (success) this.setReadyState(routerId, true);
-        else console.log("failed to connect")
-      });
+
+      if (this.onConnectCallback) this.onConnectCallback(false); // indicate that previous conenction was unsuccessful
+      this.onConnectCallback = this.onConnect.bind(this,routerId);
+      this.connectTo(routerId, this.onConnectCallback);
     }
   }
   get routerId() { return this._routerId ?? null; }
   hasRouter() { return this._routerId != null; }
+
+  private onConnect(routerId: string, success: boolean) {
+    this.onConnectCallback = null;
+    if (success) this.setReadyState(routerId, true);
+    else {
+      setTimeout(this.doDisconnect.bind(this, routerId), 1000);
+    }
+  }
   
-  abstract connectTo(id: string): Promise<boolean>;
+  abstract connectTo(id: string, callback: (success: boolean) => void ): void; // using callback as a type of promise (kind of...)
   abstract disconnectFrom(id: string): Promise<boolean>;
 
   abstract createNewChannel(id: string): ChannelType;
@@ -376,19 +400,18 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   }
 
   protected recalculateMinDist() {
-    const subclientMinDist = this.subclientDist;
-    subclientMinDist.clear();
+    this.subclientDist.clear();
 
     for (const [clientId, subclients] of this.clients) {
-      subclientMinDist.set(clientId, { dist: 1, client: clientId }); // add in direct clients
+      this.subclientDist.set(clientId, { dist: 1, client: clientId }); // add in direct clients
 
       // add in subclients
       for (const [subclientId, distance] of subclients) {
-        if (!subclientMinDist.has(subclientId)) subclientMinDist.set(subclientId, { client: clientId, dist: distance });
+        if (!this.subclientDist.has(subclientId)) this.subclientDist.set(subclientId, { client: clientId, dist: distance });
         else {
-          const oldDist = subclientMinDist.get(subclientId).dist;
+          const oldDist = this.subclientDist.get(subclientId).dist;
           if (oldDist < distance) { // new distance is lesser
-            subclientMinDist.set(subclientId, { dist: distance, client: clientId });
+            this.subclientDist.set(subclientId, { dist: distance, client: clientId });
           }
         }
       }

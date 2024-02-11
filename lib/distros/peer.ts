@@ -16,6 +16,7 @@ export class PeerConnection extends ConnectionBase<PeerClient> {
   getLocalId(id: string) { return id.replace(this.prefix, ""); } // strip prefix
 }
 
+type error_t = "browser-incompatible" | "disconnected" | "invalid-id" | "invalid-key" | "network" | "peer-unavailable" | "ssl-unavailable" | "server-error" | "socket-closed" | "unavailable-id" | "webrtc";
 export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   readonly peer: any;
   private waitingForPeerOpen: () => void = null;
@@ -31,14 +32,41 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
       console.log("ready to send!")
     });
 
-    this.peer.on('connection', (conn: any) => {
-      conn.on('data', (data: string) => {
+    this.peer.on("connection", (conn: any) => {
+      conn.on("data", (data: string) => {
         data = String(data); // stringify in case not yet
         this.listener.trigger("receive", data);
       });
-
+      
       this.addPeerConnection(conn);
     });
+
+    this.peer.on("error", (err: { name: string, type: error_t, message: string }) => {
+      switch (err.type) {
+        // general connection errors
+        case "browser-incompatible":
+        case "disconnected": // (from server)
+        case "invalid-key":
+        case "network":
+        case "ssl-unavailable":
+        case "server-error":
+        case "socket-closed":
+        case "webrtc":
+          this.errListener.trigger("connection", { message: err.message, type: err.type });
+          break;
+
+        // peer doesn't exist
+        case "peer-unavailable":
+          this.errListener.trigger("unavailable", { message: err.message, type: err.type });
+          break;
+        
+        // invalid peer id on construct
+        case "invalid-id":
+        case "unavailable-id":
+          this.errListener.trigger("id", { message: err.message, type: err.type });
+          break;
+        }
+    })
 
     this.listener.on("readystatechange", (id: string) => {
       if (id == this.id && this.getReadyState(id) && this.waitingForPeerOpen) {
@@ -50,28 +78,27 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
 
   private addPeerConnection(conn: any) {
     const id = this.conn.getLocalId(conn.peer);
-    this.setReadyState(id, true);
+    this.toggleReadyStateTo(id, true);
     this.conns.set(id, conn);
   }
 
   createNewChannel(id: string): PeerChannel { return new PeerChannel(id, this); }
   
-  connectTo(id: string) {
-    return new Promise<boolean>((resolve,reject) => {
-      if (this.getReadyState(this.id)) return this.doConnectTo(id,resolve); // already able to connect
-      this.waitingForPeerOpen = this.doConnectTo.bind(this, id, resolve); // wait until able to connect
-    });
+  connectTo(id: string, callback: (success: boolean) => void) {
+    if (this.getReadyState(this.id)) return this.doConnectTo(id,callback); // already able to connect
+    this.waitingForPeerOpen = this.doConnectTo.bind(this, id, callback); // wait until able to connect
   }
 
   private doConnectTo(id: string, resolve: (val: boolean) => void) {
-    if (this.conns.has(id)) { // connection alrady established
+    if (this.conns.has(id) && this.conns.get(id)) { // connection alrady established
       resolve(true);
       return;
     }
     const conn = this.peer.connect(this.conn.getFullId(id));
     conn.on("open", () => {
       this.conns.set(id, conn);
-      this.setReadyState(id, true);
+      this.toggleReadyStateTo(id, true);
+      console.log("open")
       resolve(true);
     });
     conn.on("data", (data: any) => {
@@ -83,7 +110,7 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   }
 
   async disconnectFrom(id: string) {
-    if (this.conns.has(id)) {
+    if (this.conns.has(id) && this.conns.get(id)) {
       this.conns.get(id).close();
       this.conns.delete(id);
     }
