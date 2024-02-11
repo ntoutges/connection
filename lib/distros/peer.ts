@@ -97,7 +97,7 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   }
 }
 
-export class PeerChannel extends ChannelBase<PeerConnection, PeerClient> {
+export class PeerChannel extends ChannelBase<PeerClient> {
   protected doSend(msg: string, recipientId: string) {
     const conn = this.client.getConn(recipientId);
     if (conn) {

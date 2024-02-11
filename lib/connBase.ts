@@ -66,7 +66,7 @@ export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
   }
 }
 
-export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, ChannelType extends ChannelBase<any,any>> {
+export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, ChannelType extends ChannelBase<any>> {
   readonly id: string;
   readonly conn: ConnectionType;
   protected readonly channels = new Map<string, ChannelType>();
@@ -457,7 +457,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   }
 }
 
-export abstract class ChannelBase<ConnectionType extends ConnectionBase<any>, ClientType extends ClientBase<any,any>> {
+export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
   protected readonly requestIds = new Ids();
   protected readonly requestResolves = new Map<number, (msg:channelMessageData) => void>();
   readonly id: string;
