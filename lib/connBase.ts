@@ -113,16 +113,16 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     });
   }
 
-  protected setReadyState(id: string, isReady: boolean) {
+  protected setReadyState(id: string, isReady: boolean, doTriggerEvent: boolean = true) {
     const wasReady = this.readyStates.has(id);
     if (wasReady == isReady) return; // no change occurred
     if (isReady) { // connection created
       this.readyStates.add(id);
-      if (id != this.id) this.listener.trigger("connect", id);
+      if (id != this.id && doTriggerEvent) this.listener.trigger("connect", id);
     }
     else { // connection destroyed
       this.readyStates.delete(id);
-      if (id != this.id) this.listener.trigger("disconnect", id);
+      if (id != this.id && doTriggerEvent) this.listener.trigger("disconnect", id);
     }
 
     this.listener.trigger("readystatechange", id);
@@ -130,7 +130,6 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   getReadyState(id: string) { return this.readyStates.has(id); }
 
   set routerId(routerId: string) {
-    if (!routerId) { this._routerId = null; }
     if (routerId == this._routerId) return; // unchanged
 
     // tell old router that this router is disconnecting
@@ -140,7 +139,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       });
       const oldId = this._routerId;
       this.disconnectFrom(oldId).then(success => {
-        if (success) this.setReadyState(routerId, false);
+        this.setReadyState(oldId, false, false); // no matter what, treat as disconnected (if fail, likely already disconnected)
       })
     }
 
@@ -157,6 +156,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       });
       this.connectTo(routerId).then(success => {
         if (success) this.setReadyState(routerId, true);
+        else console.log("failed to connect")
       });
     }
   }
@@ -272,8 +272,14 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
 
       interval *= 3; // allow 3 missed messages before heartbeat declared dead
 
-      if (!this.clientHeartbeats.has(id)) this.clientHeartbeats.set(id, new SmartTimeout(this.doDisconnect.bind(this,id), interval)); // create new entry
-      else this.clientHeartbeats.get(id).timeout = interval; // update existing entry
+      if (interval > 0) { // only create new interval if non-zero
+        if (!this.clientHeartbeats.has(id)) this.clientHeartbeats.set(id, new SmartTimeout(this.doDisconnect.bind(this,id), interval)); // create new entry
+        else this.clientHeartbeats.get(id).timeout = interval; // update existing entry
+      }
+      else { // stop timeout
+        if (this.clientHeartbeats.has(id)) this.clientHeartbeats.get(id).pause();
+        this.clientHeartbeats.delete(id);
+      }
     }
 
     if (

@@ -103,8 +103,5 @@ export class PeerChannel extends ChannelBase<PeerConnection, PeerClient> {
     if (conn) {
       conn.send(msg);
     }
-    else {
-      console.log("invalid!")
-    }
   }
 }

@@ -64,7 +64,7 @@ export class Listener<Types, Data> {
     period: number = null // ms
   ) {
     if (this.pollingIntervals.has(type)) { // modify existing SmartInterval
-      if (period != null) this.pollingIntervals.get(type).setInterval(period);
+      if (period != null) this.pollingIntervals.get(type).interval = period;
       this.pollingIntervals.get(type).setCallback(callback);
     }
     this.pollingCallbacks.set(type, [ callback, period ?? 400 ]); // create new entry
@@ -75,7 +75,7 @@ export class Listener<Types, Data> {
     period: number
   ) {
     if (this.pollingIntervals.has(type)) { // modify existing SmartInterval
-      this.pollingIntervals.get(type).setInterval(period);
+      this.pollingIntervals.get(type).interval = period;
     }
     this.pollingCallbacks.set(type, [ () => { return null; }, period ?? 400 ]); // create new entry
   }

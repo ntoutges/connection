@@ -20,7 +20,7 @@ export class SmartInterval {
     const oldInterval = this.timeout;
     this.timeout = interval;
 
-    if (interval > 0 && oldInterval != this.timeout && !this._isPaused) { // new and valid interval
+    if (oldInterval != this.timeout && !this._isPaused) { // new and valid interval
       this.createInterval();
     }
   }
@@ -41,8 +41,7 @@ export class SmartInterval {
 
   play() {
     if (!this._isPaused) return; // already is playing
-    this.createInterval();
-    this._isPaused = false;
+    if (this.createInterval()) this._isPaused = false;
   }
 
   // stop current interval, and wait [this.timeout]ms to send the next
@@ -55,6 +54,8 @@ export class SmartInterval {
   get isPaused() { return this._isPaused; }
 
   private createInterval() {
+    if (this.timeout <= 0) return false; // don't create interval with invalid timeout
+
     const now = (new Date()).getTime();
     if (this.iId != null) clearInterval(this.iId); // remove old interval, then replace it
     if (this.tId != null) clearTimeout(this.tId); // remove old timeout
@@ -78,6 +79,7 @@ export class SmartInterval {
         this.timeout
       );
     }, delay);
+    return true; // successfully created interval
   }
 
   get id() { return this.iId; }
