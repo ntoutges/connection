@@ -31,6 +31,8 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   async disconnectFrom(id: string) { return true; } // always assume success
 
   acceptConnection(id: string) { this.setReadyState(id, true); }
+
+  protected async destroyClient(): Promise<void> {}
 }
 
 export class LocalChannel extends ChannelBase<LocalClient> {

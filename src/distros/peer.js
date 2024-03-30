@@ -80,7 +80,6 @@ export class PeerClient extends ClientBase {
         conn.on("open", () => {
             this.conns.set(id, conn);
             this.toggleReadyStateTo(id, true);
-            console.log("open");
             resolve(true);
         });
         conn.on("data", (data) => {

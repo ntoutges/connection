@@ -44,6 +44,15 @@ export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
     if (!this.clients.has(id)) this.clients.set(id, this.createNewClient(id, heartbeatInterval));
     return this.clients.get(id);
   }
+  destroyClient(id: string) {
+    if (!this.clients.has(id)) return;
+    
+    const client = this.clients.get(id);
+    this.clients.delete(id);
+    
+    if (!client.isDestroyed) client.destroy();
+  }
+
   getClient(id: string) {
     return this.clients.get(id) ?? null;
   }
@@ -86,6 +95,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   readonly listener = new Listener<clientEvents, string>();
   readonly errListener = new Listener<errEvents, { type: string, message: string }>();
   private readonly readyStates = new Set<string>();
+  private _isDestroyed = false;
 
   readonly hbInterval: SmartInterval;
 
@@ -112,7 +122,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
         this.dmChannel.sendControlMessage({
           hb: {
             id: this.id,
-            interval: this.hbInterval.interval
+            interval: this.hbInterval.getInterval()
           }
         }, id); // send control message to all
       }, 1000); // need to figure out why this is needed...
@@ -478,6 +488,23 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       this.clientHeartbeats.delete(id);
     }
   }
+
+  async destroy() {
+    this.routerId = null; // disconnect from router
+    
+    const promises: Promise<boolean>[] = [];
+    this.clients.forEach((_, clientId) => {
+      promises.push(this.disconnectFrom(clientId));
+    });
+    
+    this.listener.clear()
+    await this.destroyClient();
+    this.conn.destroyClient(this.id);
+  }
+
+  protected abstract destroyClient(): Promise<void>;
+
+  get isDestroyed() { return this._isDestroyed; }
 }
 
 export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
