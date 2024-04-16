@@ -1,15 +1,27 @@
 import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
-import { Listener } from "../listener.js";
+
+const connWorlds = new Map<string, Map<string,LocalClient>>();
 
 export class LocalConnection extends ConnectionBase<LocalClient> {
-  protected createNewClient(id: string, heartbeatInterval: number): LocalClient { return new LocalClient(id,this, heartbeatInterval); }
+  readonly worldId: string;
+  constructor(worldId: string = "default") {
+    super();
+    this.worldId = worldId;
+    if (!connWorlds.has(this.worldId)) connWorlds.set(this.worldId, new Map());
+  }
+  protected createNewClient(id: string, heartbeatInterval: number): LocalClient {
+    const client = new LocalClient(id,this, heartbeatInterval);
+    connWorlds.get(this.worldId).set(id, client);
+    debugger;
+    return client;
+  }
 }
 
 export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   constructor(id: string, connection: LocalConnection, heartbeatInterval: number) {
     super(id, connection, heartbeatInterval);
 
-    this.setReadyState(this.id, true)
+    setTimeout(() => { this.setReadyState(this.id, true); }, 1); // allow other events to happen before running this
   }
   
   createNewChannel(id: string): LocalChannel { return new LocalChannel(id, this); }
@@ -19,12 +31,15 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
     return null;
   }
 
-  async connectTo(id: string) {
-    const otherClient = this.conn.getClient(id);
-    if (!otherClient) return false;
-
-    otherClient.acceptConnection(this.id);
-    return true;
+  connectTo(id: string, callback: (success: boolean) => void): void {
+    setTimeout(() => {  // allow other events to happen before running this
+      const otherClient = connWorlds.get(this.conn.worldId).get(id);
+      if (!otherClient) callback(false);
+      else {
+        otherClient.acceptConnection(this.id);
+        callback(true);
+      }
+    }, 1);
   }
 
   // TODO: make this do something...
@@ -32,19 +47,21 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
 
   acceptConnection(id: string) { this.setReadyState(id, true); }
 
-  protected async destroyClient(): Promise<void> {}
+  protected async destroyClient(): Promise<void> {
+    connWorlds.get(this.conn.worldId).delete(this.id);
+  }
 }
 
 export class LocalChannel extends ChannelBase<LocalClient> {
   protected doSend(msg: string, recipientId: string) {
-    const recipient = this.client.getClient(recipientId)
+    const recipient = connWorlds.get(this.client.conn.worldId).get(recipientId);
     if (!recipient) { // no one to send to, so push to queue
       this.sendQueue.add([msg, () => recipientId]);
       return;
     }
 
-    setTimeout(() => { // emulate sending over data channel
+    setTimeout(() => { // send, and allow break in call stack
       recipient.listener.trigger("receive", msg);
-    }, 100);
+    }, 1);
   }
 }
