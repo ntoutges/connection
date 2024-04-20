@@ -12,7 +12,6 @@ export class LocalConnection extends ConnectionBase<LocalClient> {
   protected createNewClient(id: string, heartbeatInterval: number): LocalClient {
     const client = new LocalClient(id,this, heartbeatInterval);
     connWorlds.get(this.worldId).set(id, client);
-    debugger;
     return client;
   }
 }
