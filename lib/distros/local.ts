@@ -4,8 +4,14 @@ const connWorlds = new Map<string, Map<string,LocalClient>>();
 
 export class LocalConnection extends ConnectionBase<LocalClient> {
   readonly worldId: string;
-  constructor(worldId: string = "default") {
+  constructor({
+    worldId = "default"
+  }: {
+    worldId?: string
+  }) {
     super();
+    this.addInitParams({ worldId })
+
     this.worldId = worldId;
     if (!connWorlds.has(this.worldId)) connWorlds.set(this.worldId, new Map());
   }

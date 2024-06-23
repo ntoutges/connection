@@ -4,10 +4,18 @@ export class PeerConnection extends ConnectionBase<PeerClient> {
   readonly Peer: any;
   readonly prefix: string;
 
-  constructor(Peer: any, prefix: string) {
+  constructor({
+    Peer,
+    prefix
+  }: {
+    Peer: any,
+    prefix: string
+  }) {
     super();
     this.Peer = Peer;
     this.prefix = prefix;
+
+    this.addInitParams({ prefix });
   }
 
   protected createNewClient(id: string, heartbeatInterval: number): PeerClient { return new PeerClient(id,this,heartbeatInterval); }

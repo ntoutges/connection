@@ -1,3 +1,4 @@
+import { Saveable } from "../saveable/saveable.js";
 import { Ids } from "./ids.js";
 import { Listener } from "./listener.js";
 import { SmartInterval } from "./smartInterval.js";
@@ -34,7 +35,7 @@ export type channelMessageData = {
   } | null
 }
 
-export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
+export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> extends Saveable<any> {
   protected readonly clients = new Map<string, ClientType>();
   protected readonly middleware = new Map<string, (data: channelMessage) => any>()
 
@@ -74,6 +75,9 @@ export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> {
     }
     return body;
   }
+
+  // loading non-parameters likely not required...
+  load(state: Record<string,any>) {}
 }
 
 export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, ChannelType extends ChannelBase<any>> {
