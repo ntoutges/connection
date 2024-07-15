@@ -26,7 +26,7 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   constructor(id: string, connection: LocalConnection, heartbeatInterval: number) {
     super(id, connection, heartbeatInterval);
 
-    setTimeout(() => { this.setReadyState(this.id, true); }, 1); // allow other events to happen before running this
+    setTimeout(() => { this.setReadyState(this.id, true); }, 0); // allow other events to happen before running this
   }
   
   createNewChannel(id: string): LocalChannel { return new LocalChannel(id, this); }
@@ -37,14 +37,12 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   }
 
   connectTo(id: string, callback: (success: boolean) => void): void {
-    setTimeout(() => {  // allow other events to happen before running this
-      const otherClient = connWorlds.get(this.conn.worldId).get(id);
-      if (!otherClient) callback(false);
-      else {
-        otherClient.acceptConnection(this.id);
-        callback(true);
-      }
-    }, 1);
+    const otherClient = connWorlds.get(this.conn.worldId).get(id);
+    if (!otherClient) callback(false);
+    else {
+      otherClient.acceptConnection(this.id);
+      callback(true);
+    }
   }
 
   // TODO: make this do something...

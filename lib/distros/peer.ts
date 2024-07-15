@@ -18,7 +18,7 @@ export class PeerConnection extends ConnectionBase<PeerClient> {
     this.addInitParams({ prefix });
   }
 
-  protected createNewClient(id: string, heartbeatInterval: number): PeerClient { return new PeerClient(id,this,heartbeatInterval); }
+  protected createNewClient(id: string, heartbeatInterval: number): PeerClient { return new PeerClient(id, this, heartbeatInterval); }
 
   getFullId(id: string) { return this.prefix + id; }
   getLocalId(id: string) { return id.replace(this.prefix, ""); } // strip prefix
