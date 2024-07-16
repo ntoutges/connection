@@ -2,10 +2,11 @@ import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
 export class PeerConnection extends ConnectionBase {
     Peer;
     prefix;
-    constructor(Peer, prefix) {
+    constructor({ Peer, prefix }) {
         super();
         this.Peer = Peer;
         this.prefix = prefix;
+        this.addInitParams({ prefix });
     }
     createNewClient(id, heartbeatInterval) { return new PeerClient(id, this, heartbeatInterval); }
     getFullId(id) { return this.prefix + id; }
@@ -20,7 +21,6 @@ export class PeerClient extends ClientBase {
         this.peer = new connection.Peer(this.fullId);
         this.peer.on("open", (id) => {
             this.setReadyState(this.id, true); // self is ready
-            console.log("ready to send!");
         });
         this.peer.on("connection", (conn) => {
             conn.on("data", (data) => {
@@ -99,6 +99,9 @@ export class PeerClient extends ClientBase {
     get fullId() { return this.conn.getFullId(this.id); }
     getConn(id) {
         return this.conns.get(id) ?? null;
+    }
+    async destroyClient() {
+        this.peer.destroy();
     }
 }
 export class PeerChannel extends ChannelBase {

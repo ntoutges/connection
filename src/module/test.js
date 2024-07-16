@@ -1,6 +1,6 @@
 import { LocalConnection } from "./distros/local.js";
 import { SmartTimeout } from "./smartTimeout.js";
-const connection = new LocalConnection();
+const connection = new LocalConnection({});
 connection.addMiddleware("json", (message) => {
     return JSON.parse(message.data);
 });

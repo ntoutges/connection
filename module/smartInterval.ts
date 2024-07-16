@@ -34,6 +34,7 @@ export class SmartInterval {
   }
 
   play() {
+    if (this.timeout == 0) return;
     this.createInterval();
     this._isPaused = false;
   }

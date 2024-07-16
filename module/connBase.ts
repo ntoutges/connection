@@ -237,15 +237,34 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
 
       switch (type) {
         case "control":
-          try {
-            this.handleControl(JSON.parse(message.data), message.header);
-          }
+          if (message.header && message.header.recipient != null && message.header.recipient != this.id) return; // Message not intended for this client
+          
+          try { this.handleControl(JSON.parse(message.data), message.header); }
           catch(err) {} // catch error to not stop program because of malformed message
           this.dmChannel.listener.trigger("_control", messageData);
           return;
         case "send":
           if (tags.includes("hb")) return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
           break;
+        case "request":
+          if (!tags.includes("init") || !message?.header?.id || !origin) break; // non-init, or malformed id
+          messageData.res = {
+            send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+          };
+
+          {
+            let oldReadyState = this.getReadyState(origin);
+
+            this.setReadyState(origin, true, false);  // Allow for message to be sent
+            this.dmChannel.sendResponse(message, message.data);
+            this.setReadyState(origin, oldReadyState, false); // Reset ready state
+
+          }
+          return;
+        case "response": 
+        if (!tags.includes("init")) break;
+        this.dmChannel.respond(messageData);
+        return;
       }
       
       // forward to someone who probably knows the final recipient
@@ -296,6 +315,9 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
       && "subclients" in control.client && typeof control.client.subclients == "object"
     ) {
       this.handleSubclientDiscovery(control, header);
+      
+      // Set ready state, if no other mechanism
+      this.setReadyState(control.client.id, true);
     }
 
     if (
@@ -530,10 +552,22 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     this.doSendTo({ type: "send", tags }, data, finalRecipientId);
   }
 
-  request(data: string, finalRecipientId: string, tags: string = "") { // tags in the form of csv
+  request(data: string, finalRecipientId: string, timeout: number = null, tags: string = "") { // tags in the form of csv
     return new Promise<channelMessageData>((resolve, reject) => {
-      const id = this.initRequest(resolve);
+      let timeoutId: number = null;
+      const id = this.initRequest((value) => {
+        clearTimeout(timeoutId); // Stop timeout from running
+        resolve(value);
+      });
       this.doSendTo({ type: "request", id, tags }, data, finalRecipientId);
+
+      // After some time, assume connection failed
+      if (timeout !== null && timeout > 0) {
+        timeoutId = setTimeout(() => {
+          this.cancelRequest(id);
+          reject();
+        }, timeout);
+      }
     });
   }
 
@@ -541,8 +575,13 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     this.sendTo("", finalRecipientId, "hb");
   }
 
-  echo(data: string, finalRecipientId: string) {
-    return this.request(data, finalRecipientId, "echo");
+  echo(data: string, finalRecipientId: string, timeout?: number, tags: string = "") {
+    // Combine tags
+    let fullTags = "echo";
+    if (tags) fullTags += "," + tags;
+
+    // Echo is just a request in disguise
+    return this.request(data, finalRecipientId, timeout, fullTags);
   }
 
   protected abstract doSend(msg: string, recipientId: string): void;
@@ -654,6 +693,11 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     const id = this.requestIds.generateId();
     this.requestResolves.set(id, resolve);
     return id;
+  }
+
+  private cancelRequest(id: number) {
+    this.requestResolves.delete(id);
+    this.requestIds.releaseId(id);
   }
 
   respond(message: channelMessageData) {

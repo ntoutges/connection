@@ -1,15 +1,24 @@
+import { Saveable } from "../saveable/saveable.js";
 import { Ids } from "./ids.js";
 import { Listener } from "./listener.js";
 import { SmartInterval } from "./smartInterval.js";
 import { SmartTimeout } from "./smartTimeout.js";
 import { TimeoutQueue } from "./timeoutQueue.js";
-export class ConnectionBase {
+export class ConnectionBase extends Saveable {
     clients = new Map();
     middleware = new Map();
     buildClient(id, heartbeatInterval = 1000) {
         if (!this.clients.has(id))
             this.clients.set(id, this.createNewClient(id, heartbeatInterval));
         return this.clients.get(id);
+    }
+    destroyClient(id) {
+        if (!this.clients.has(id))
+            return;
+        const client = this.clients.get(id);
+        this.clients.delete(id);
+        if (!client.isDestroyed)
+            client.destroy();
     }
     getClient(id) {
         return this.clients.get(id) ?? null;
@@ -30,6 +39,8 @@ export class ConnectionBase {
         }
         return body;
     }
+    // loading non-parameters likely not required...
+    load(state) { }
 }
 export class ClientBase {
     id;
@@ -46,6 +57,7 @@ export class ClientBase {
     listener = new Listener();
     errListener = new Listener();
     readyStates = new Set();
+    _isDestroyed = false;
     hbInterval;
     constructor(id, connection, heartbeatInterval) {
         this.id = id;
@@ -68,7 +80,7 @@ export class ClientBase {
                 this.dmChannel.sendControlMessage({
                     hb: {
                         id: this.id,
-                        interval: this.hbInterval.interval
+                        interval: this.hbInterval.getInterval()
                     }
                 }, id); // send control message to all
             }, 1000); // need to figure out why this is needed...
@@ -169,6 +181,8 @@ export class ClientBase {
             }
             switch (type) {
                 case "control":
+                    if (message.header && message.header.recipient != null && message.header.recipient != this.id)
+                        return; // Message not intended for this client
                     try {
                         this.handleControl(JSON.parse(message.data), message.header);
                     }
@@ -179,6 +193,24 @@ export class ClientBase {
                     if (tags.includes("hb"))
                         return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
                     break;
+                case "request":
+                    if (!tags.includes("init") || !message?.header?.id || !origin)
+                        break; // non-init, or malformed id
+                    messageData.res = {
+                        send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+                    };
+                    {
+                        let oldReadyState = this.getReadyState(origin);
+                        this.setReadyState(origin, true, false); // Allow for message to be sent
+                        this.dmChannel.sendResponse(message, message.data);
+                        this.setReadyState(origin, oldReadyState, false); // Reset ready state
+                    }
+                    return;
+                case "response":
+                    if (!tags.includes("init"))
+                        break;
+                    this.dmChannel.respond(messageData);
+                    return;
             }
             // forward to someone who probably knows the final recipient
             if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
@@ -211,7 +243,7 @@ export class ClientBase {
                     break;
                 case "send":
                     channel.listener.trigger("message", messageData);
-                    if (!("recipient" in message.header) || message.header.recipient == "")
+                    if (!("recipient" in message.header) || message.header.recipient == null)
                         this.rebroadcast(message); // recipient doesn't matter
             }
             // channel.listener.trigger("all", messageData);
@@ -225,6 +257,8 @@ export class ClientBase {
             && "mode" in control.client
             && "subclients" in control.client && typeof control.client.subclients == "object") {
             this.handleSubclientDiscovery(control, header);
+            // Set ready state, if no other mechanism
+            this.setReadyState(control.client.id, true);
         }
         if ("hb" in control
             && "id" in control.hb
@@ -352,14 +386,7 @@ export class ClientBase {
         catch (err) { }
         if (!Array.isArray(pathArr))
             pathArr = []; // reset to empty array if not array
-        if (this._routerId && !pathArr.includes(this._routerId)) {
-            this.dmChannel.forward(message);
-        }
-        for (const [clientId, subClients] of this.clients) {
-            if (pathArr.includes(clientId))
-                continue; // ignore anyone in send path
-            this.dmChannel.forward(message);
-        }
+        this.dmChannel.forward(message);
     }
     // returns router and client ids
     static debug_getStructure(client) {
@@ -397,6 +424,17 @@ export class ClientBase {
             this.clientHeartbeats.delete(id);
         }
     }
+    async destroy() {
+        this.routerId = null; // disconnect from router
+        const promises = [];
+        this.clients.forEach((_, clientId) => {
+            promises.push(this.disconnectFrom(clientId));
+        });
+        this.listener.clear();
+        await this.destroyClient();
+        this.conn.destroyClient(this.id);
+    }
+    get isDestroyed() { return this._isDestroyed; }
 }
 export class ChannelBase {
     requestIds = new Ids();
@@ -417,17 +455,33 @@ export class ChannelBase {
     sendTo(data, finalRecipientId, tags = "") {
         this.doSendTo({ type: "send", tags }, data, finalRecipientId);
     }
-    request(data, finalRecipientId, tags = "") {
+    request(data, finalRecipientId, timeout = null, tags = "") {
         return new Promise((resolve, reject) => {
-            const id = this.initRequest(resolve);
+            let timeoutId = null;
+            const id = this.initRequest((value) => {
+                clearTimeout(timeoutId); // Stop timeout from running
+                resolve(value);
+            });
             this.doSendTo({ type: "request", id, tags }, data, finalRecipientId);
+            // After some time, assume connection failed
+            if (timeout !== null && timeout > 0) {
+                timeoutId = setTimeout(() => {
+                    this.cancelRequest(id);
+                    reject();
+                }, timeout);
+            }
         });
     }
     sendHeartbeat(finalRecipientId) {
         this.sendTo("", finalRecipientId, "hb");
     }
-    echo(data, finalRecipientId) {
-        return this.request(data, finalRecipientId, "echo");
+    echo(data, finalRecipientId, timeout, tags = "") {
+        // Combine tags
+        let fullTags = "echo";
+        if (tags)
+            fullTags += "," + tags;
+        // Echo is just a request in disguise
+        return this.request(data, finalRecipientId, timeout, fullTags);
     }
     // if recipientId is null, will send to ALL
     doSendTo(header, data, finalRecipientId) {
@@ -438,7 +492,21 @@ export class ChannelBase {
         }
         if (!("recipient" in header) || header.recipient != null)
             header.recipient = finalRecipientId; // set recipientId
+        let path = [];
+        if (("sender" in header)) {
+            try {
+                path = JSON.parse(header.sender.path);
+            }
+            catch (err) { // invalid path; reset
+                header.sender.path = "[]";
+                path = [];
+            }
+        }
+        if (path.includes(finalRecipientId))
+            return; // recipient has already recieved message; don't need to send again
         const recipientId = this.client.getSendClient(finalRecipientId);
+        if (path.includes(recipientId))
+            return; // recipient has already recieved message; don't need to send again
         const msg = this.constructMessageString(header, data);
         if (!this.client.getReadyState(this.client.id) // client not yet ready to send
             || recipientId === null // finalRecipient cannot be reached
@@ -480,23 +548,23 @@ export class ChannelBase {
             this.doSendTo(header, data, clientId);
         }
     }
-    // doSendTo, but stops if current client id already in header.sender.path
-    doForwardTo(header, data, finalRecipientId = null) {
-        const path = header?.sender?.path ?? null;
-        if (path) {
-            try {
-                const pathArr = JSON.parse(path);
-                if (Array.isArray(pathArr) && pathArr.includes(this.client.id))
-                    return; // don't send, as it would be a repeat
-            }
-            catch (err) { }
-        }
-        this.doSendTo(header, data, finalRecipientId);
-    }
+    // doSendTo, but stops if current client id already in header.sender.path // aka: useless
+    // protected doForwardTo(header: channelMessage["header"], data: channelMessage["data"], finalRecipientId: string = null) {
+    //   const path = header?.sender?.path ?? null;
+    //   if (path) {
+    //     try {
+    //       const pathArr = JSON.parse(path);
+    //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) console.log("STOP")
+    //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) return; // don't send, as it would be a repeat
+    //     }
+    //     catch(err) {}
+    //   }
+    //   this.doSendTo(header, data, finalRecipientId);
+    // }
     forward(message) {
         if (!("header" in message && "data" in message && "recipient" in message.header))
             return; // invalid message
-        this.doForwardTo(message.header, message.data, message.header.recipient);
+        this.doSendTo(message.header, message.data, message.header.recipient);
     }
     sendControlMessage(data, finalRecipientId = null, lastHeader) {
         if (finalRecipientId === null) {
@@ -509,12 +577,16 @@ export class ChannelBase {
         if (!lastHeader)
             this.doSendTo(header, JSON.stringify(data), finalRecipientId);
         else
-            this.doForwardTo(header, JSON.stringify(data), finalRecipientId);
+            this.doSendTo(header, JSON.stringify(data), finalRecipientId);
     }
     initRequest(resolve) {
         const id = this.requestIds.generateId();
         this.requestResolves.set(id, resolve);
         return id;
+    }
+    cancelRequest(id) {
+        this.requestResolves.delete(id);
+        this.requestIds.releaseId(id);
     }
     respond(message) {
         if (!message.req.header.id)

@@ -32,7 +32,6 @@
         flex-grow: 1;
         padding: 2px;
         border-width: 1px;
-        width: calc(100% - 6px);
         resize: none;
         background: #bababaaa;
       }
@@ -45,6 +44,8 @@
         display: flex;
         flex-direction: column;
         gap: 5px;
+
+        flex-grow: 2 !important;
 
         overflow-y: auto;
       }
@@ -68,18 +69,22 @@
     </div>
 
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="socket.io/socket.io.js"></script>
+
     <script type="module" defer>
-      import { LocalConnection } from "./src/distros/local.js";
-      import { PeerConnection } from "./src/distros/peer.js";
+      import { LocalConnection } from "./src/module/distros/local.js";
+      import { PeerConnection } from "./src/module/distros/peer.js";
+      import { SocketConnection } from "./src/module/distros/socket.js";
       
       const args = window.location.search.substring(1).split("&");
       const myId = args[0] ?? "";
       const routerId = args[1] ?? "";
 
-      
-      
+      const socket = io();
+
       // const conn = new LocalConnection();
-      const conn = new PeerConnection(Peer, "testpeer-");
+      // const conn = new PeerConnection({ Peer, prefix: "testpeer-" });
+      const conn = new SocketConnection({ socket });
 
       // const router = conn.buildClient(routerId);
       // const channel2 = router.buildChannel("test");

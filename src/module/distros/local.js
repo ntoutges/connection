@@ -1,11 +1,24 @@
 import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+const connWorlds = new Map();
 export class LocalConnection extends ConnectionBase {
-    createNewClient(id, heartbeatInterval) { return new LocalClient(id, this, heartbeatInterval); }
+    worldId;
+    constructor({ worldId = "default" }) {
+        super();
+        this.addInitParams({ worldId });
+        this.worldId = worldId;
+        if (!connWorlds.has(this.worldId))
+            connWorlds.set(this.worldId, new Map());
+    }
+    createNewClient(id, heartbeatInterval) {
+        const client = new LocalClient(id, this, heartbeatInterval);
+        connWorlds.get(this.worldId).set(id, client);
+        return client;
+    }
 }
 export class LocalClient extends ClientBase {
     constructor(id, connection, heartbeatInterval) {
         super(id, connection, heartbeatInterval);
-        this.setReadyState(this.id, true);
+        setTimeout(() => { this.setReadyState(this.id, true); }, 0); // allow other events to happen before running this
     }
     createNewChannel(id) { return new LocalChannel(id, this); }
     getClient(id) {
@@ -13,27 +26,32 @@ export class LocalClient extends ClientBase {
             return this.conn.getClient(id);
         return null;
     }
-    async connectTo(id) {
-        const otherClient = this.conn.getClient(id);
+    connectTo(id, callback) {
+        const otherClient = connWorlds.get(this.conn.worldId).get(id);
         if (!otherClient)
-            return false;
-        otherClient.acceptConnection(this.id);
-        return true;
+            callback(false);
+        else {
+            otherClient.acceptConnection(this.id);
+            callback(true);
+        }
     }
     // TODO: make this do something...
     async disconnectFrom(id) { return true; } // always assume success
     acceptConnection(id) { this.setReadyState(id, true); }
+    async destroyClient() {
+        connWorlds.get(this.conn.worldId).delete(this.id);
+    }
 }
 export class LocalChannel extends ChannelBase {
     doSend(msg, recipientId) {
-        const recipient = this.client.getClient(recipientId);
+        const recipient = connWorlds.get(this.client.conn.worldId).get(recipientId);
         if (!recipient) { // no one to send to, so push to queue
             this.sendQueue.add([msg, () => recipientId]);
             return;
         }
         setTimeout(() => {
             recipient.listener.trigger("receive", msg);
-        }, 100);
+        }, 1);
     }
 }
 //# sourceMappingURL=local.js.map
