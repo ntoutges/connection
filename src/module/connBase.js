@@ -111,7 +111,8 @@ export class ClientBase {
             if (id != this.id && doTriggerEvent)
                 this.listener.trigger("disconnect", id);
         }
-        this.listener.trigger("readystatechange", id);
+        if (doTriggerEvent)
+            this.listener.trigger("readystatechange", id);
     }
     getReadyState(id) { return this.readyStates.has(id); }
     set routerId(routerId) {
@@ -166,6 +167,19 @@ export class ClientBase {
             const channelId = message.header.channel;
             if (!type || !channelId)
                 return; // ignore malformed message
+            let path = [];
+            if (message.header.sender?.path) {
+                try {
+                    path = JSON.parse(message.header.sender.path);
+                }
+                catch (err) { } // invalid path; reset
+                // Invalid path
+                if (!Array.isArray(path))
+                    path = [];
+                // Already visited self, don't try to continue message
+                if (path.includes(this.id))
+                    return;
+            }
             const messageData = {
                 req: {
                     header: message.header,
@@ -179,72 +193,59 @@ export class ClientBase {
             if (origin != null) {
                 this.resetHeartbeat(origin);
             }
+            // not for me; forward to someone who probably knows the final recipient
+            if (message.header?.hasOwnProperty("recipient") && message.header.recipient != null && message.header.recipient != this.id) {
+                this.dmChannel.forward(message);
+                this.dmChannel.listener.trigger("_forward", messageData);
+                return;
+            }
+            const isValidChannel = this.channels.has(channelId);
+            const channel = isValidChannel ? this.channels.get(channelId) : this.dmChannel;
             switch (type) {
                 case "control":
-                    if (message.header && message.header.recipient != null && message.header.recipient != this.id)
-                        return; // Message not intended for this client
                     try {
                         this.handleControl(JSON.parse(message.data), message.header);
                     }
                     catch (err) { } // catch error to not stop program because of malformed message
                     this.dmChannel.listener.trigger("_control", messageData);
                     return;
-                case "send":
-                    if (tags.includes("hb"))
-                        return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
-                    break;
                 case "request":
-                    if (!tags.includes("init") || !message?.header?.id || !origin)
-                        break; // non-init, or malformed id
+                    if (!message?.header?.id)
+                        break; // only do if non-malformed id
+                    // set "response" object of message data
                     messageData.res = {
-                        send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+                        send: channel.sendResponse.bind(channel, message)
                     };
-                    {
-                        let oldReadyState = this.getReadyState(origin);
-                        this.setReadyState(origin, true, false); // Allow for message to be sent
-                        this.dmChannel.sendResponse(message, message.data);
-                        this.setReadyState(origin, oldReadyState, false); // Reset ready state
-                    }
-                    return;
-                case "response":
-                    if (!tags.includes("init"))
-                        break;
-                    this.dmChannel.respond(messageData);
-                    return;
-            }
-            // forward to someone who probably knows the final recipient
-            if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
-                this.dmChannel.forward(message);
-                this.dmChannel.listener.trigger("_forward", messageData);
-                return;
-            }
-            if (!this.channels.has(channelId))
-                return; // invalid channel (when it matters)
-            const channel = this.channels.get(channelId);
-            switch (type) {
-                case "request":
-                    if (message?.header?.id) { // only do if non-malformed id
-                        // set "response" object of message data
-                        messageData.res = {
-                            send: channel.sendResponse.bind(channel, message)
-                        };
-                        if (!tags.includes("echo"))
-                            channel.listener.trigger("request", messageData); // only trigger if not echo request
-                        else {
-                            channel.listener.trigger("echoB", messageData);
-                            channel.sendResponse(message, message.data);
+                    if (tags.includes("echo")) { // Echo doesn't *need* valid channel
+                        let isInit = tags.includes("init");
+                        if (!isInit)
+                            channel.listener.trigger("echoB", messageData); // Only trigger echo if not initialization message
+                        else { // Allow to message back
+                            this.handleSubclientDiscovery({ client: { id: origin, subclients: {} } });
                         }
+                        // Ensure message can be sent, even if not yet ready, given init message
+                        let oldReadyState = this.getReadyState(origin);
+                        if (isInit && !oldReadyState)
+                            this.setReadyState(origin, true, false);
+                        channel.sendResponse(message, message.data);
+                        if (isInit && !oldReadyState)
+                            this.setReadyState(origin, false, false);
+                    }
+                    else if (isValidChannel) { // only trigger if not echo request
+                        channel.listener.trigger("request", messageData);
                     }
                     break;
                 case "response":
                     channel.respond(messageData);
-                    if (tags.includes("echo"))
+                    if (tags.includes("echo") && !tags.includes(""))
                         channel.listener.trigger("echoA", messageData);
                     break;
                 case "send":
+                    if (tags.includes("hb"))
+                        break; // Message contents unimportant
                     channel.listener.trigger("message", messageData);
                     if (!("recipient" in message.header) || message.header.recipient == null)
-                        this.rebroadcast(message); // recipient doesn't matter
+                        this.dmChannel.forward(message); // recipient doesn't matter
             }
             // channel.listener.trigger("all", messageData);
         }
@@ -350,13 +351,15 @@ export class ClientBase {
             for (const subclientId in subclientsObj) {
                 forwardedSubclients[subclientId] = subclientMap.get(subclientId);
             }
-            this.dmChannel.sendControlMessage({
-                client: {
-                    id: this.id,
-                    mode: mode,
-                    subclients: forwardedSubclients
-                }
-            }, null, header);
+            if (header) {
+                this.dmChannel.sendControlMessage({
+                    client: {
+                        id: this.id,
+                        mode: mode,
+                        subclients: forwardedSubclients
+                    }
+                }, null, header);
+            }
         }
         if (didAdd)
             this.listener.trigger("subclientadd", "");
@@ -377,16 +380,6 @@ export class ClientBase {
                 }
             }
         }
-    }
-    rebroadcast(message) {
-        let pathArr = [];
-        try {
-            pathArr = JSON.parse(message.header.sender.path);
-        }
-        catch (err) { }
-        if (!Array.isArray(pathArr))
-            pathArr = []; // reset to empty array if not array
-        this.dmChannel.forward(message);
     }
     // returns router and client ids
     static debug_getStructure(client) {
@@ -501,6 +494,11 @@ export class ChannelBase {
                 header.sender.path = "[]";
                 path = [];
             }
+            // Invalid path
+            if (!Array.isArray(path)) {
+                header.sender.path = "[]";
+                path = [];
+            }
         }
         if (path.includes(finalRecipientId))
             return; // recipient has already recieved message; don't need to send again
@@ -561,9 +559,31 @@ export class ChannelBase {
     //   }
     //   this.doSendTo(header, data, finalRecipientId);
     // }
+    rebroadcast(message) {
+        let pathArr = [];
+        try {
+            pathArr = JSON.parse(message.header.sender.path);
+        }
+        catch (err) { }
+        if (!Array.isArray(pathArr))
+            pathArr = []; // reset to empty array if not array
+        // Already visited self when broadcasting
+        if (pathArr.includes(this.id))
+            return;
+    }
     forward(message) {
         if (!("header" in message && "data" in message && "recipient" in message.header))
             return; // invalid message
+        let pathArr = [];
+        try {
+            pathArr = JSON.parse(message.header.sender.path);
+        }
+        catch (err) { }
+        if (!Array.isArray(pathArr))
+            pathArr = []; // reset to empty array if not array
+        // Already encountered this client when sending; Ignore
+        if (pathArr.includes(this.client.id))
+            return;
         this.doSendTo(message.header, message.data, message.header.recipient);
     }
     sendControlMessage(data, finalRecipientId = null, lastHeader) {
