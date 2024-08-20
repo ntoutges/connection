@@ -1,4 +1,4 @@
-import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { ClientBase, ConnectionBase } from "../connBase.js";
 export class PeerConnection extends ConnectionBase {
     Peer;
     prefix;
@@ -8,7 +8,7 @@ export class PeerConnection extends ConnectionBase {
         this.prefix = prefix;
         this.addInitParams({ prefix });
     }
-    createNewClient(id, heartbeatInterval) { return new PeerClient(id, this, heartbeatInterval); }
+    createNewClient(id, protocol, heartbeatInterval) { return new PeerClient(id, this, protocol, heartbeatInterval); }
     getFullId(id) { return this.prefix + id; }
     getLocalId(id) { return id.replace(this.prefix, ""); } // strip prefix
 }
@@ -16,8 +16,8 @@ export class PeerClient extends ClientBase {
     peer;
     waitingForPeerOpen = null;
     conns = new Map(); // maps between client id and peerjs.conn object
-    constructor(id, connection, heartbeatInterval) {
-        super(id, connection, heartbeatInterval);
+    constructor(id, connection, protocol, heartbeatInterval) {
+        super(id, connection, protocol, heartbeatInterval);
         this.peer = new connection.Peer(this.fullId);
         this.peer.on("open", (id) => {
             this.setReadyState(this.id, true); // self is ready
@@ -65,7 +65,6 @@ export class PeerClient extends ClientBase {
         this.toggleReadyStateTo(id, true);
         this.conns.set(id, conn);
     }
-    createNewChannel(id) { return new PeerChannel(id, this); }
     connectTo(id, callback) {
         if (this.getReadyState(this.id))
             return this.doConnectTo(id, callback); // already able to connect
@@ -103,10 +102,8 @@ export class PeerClient extends ClientBase {
     async destroyClient() {
         this.peer.destroy();
     }
-}
-export class PeerChannel extends ChannelBase {
     doSend(msg, recipientId) {
-        const conn = this.client.getConn(recipientId);
+        const conn = this.getConn(recipientId);
         if (conn) {
             conn.send(msg);
         }

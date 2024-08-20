@@ -69,27 +69,29 @@
     </div>
 
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-    <script src="socket.io/socket.io.js"></script>
+    <!-- <script src="socket.io/socket.io.js"></script> -->
 
     <script type="module" defer>
       import { LocalConnection } from "./src/module/distros/local.js";
       import { PeerConnection } from "./src/module/distros/peer.js";
-      import { SocketConnection } from "./src/module/distros/socket.js";
-      
+      // import { SocketConnection } from "./src/module/distros/socket.js";
+
+      import { JSONProtocol } from "./src/module/protocols/json.js";
+
       const args = window.location.search.substring(1).split("&");
       const myId = args[0] ?? "";
       const routerId = args[1] ?? "";
 
-      const socket = io();
+      // const socket = io();
 
-      // const conn = new LocalConnection();
-      // const conn = new PeerConnection({ Peer, prefix: "testpeer-" });
-      const conn = new SocketConnection({ socket });
+      // const conn = new LocalConnection({});
+      const conn = new PeerConnection({ Peer, prefix: "testpeer-" });
+      // const conn = new SocketConnection({ socket });
 
-      // const router = conn.buildClient(routerId);
+      // const router = conn.buildClient(routerId, new JSONProtocol(), 500);
       // const channel2 = router.buildChannel("test");
 
-      const client = conn.buildClient(myId, 500)
+      const client = conn.buildClient(myId, new JSONProtocol(), 500)
       const channel = client.buildChannel("test");
       
       client.listener.on("connect", (id) => {

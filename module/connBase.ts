@@ -1,13 +1,13 @@
 import { Saveable } from "../saveable/saveable.js";
 import { Ids } from "./ids.js";
 import { Listener } from "./listener.js";
+import { ProtocolBase, channelSendTypes, connProtocolReceive } from "./protocolBase.js";
 import { SmartInterval } from "./smartInterval.js";
 import { SmartTimeout } from "./smartTimeout.js";
 import { TimeoutQueue } from "./timeoutQueue.js";
 
 export type clientEvents = "subclientadd" | "readystatechange" | "receive" | "connect" | "disconnect" | "reconnect";
 export type errEvents = "connection" | "unavailable" | "id";
-export type channelSendTypes = "send" | "request" | "echo" | "response" | "control";
 export type channelEvents = "request" | "message" | "echoA" | "echoB" | "_control" | "_forward";
 export type channelMessage = {
   header: {
@@ -35,14 +35,14 @@ export type channelMessageData = {
   } | null
 }
 
-export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> extends Saveable<any> {
+export abstract class ConnectionBase<ClientType extends ClientBase<any>> extends Saveable<any> {
   protected readonly clients = new Map<string, ClientType>();
   protected readonly middleware = new Map<string, (data: channelMessage) => any>()
 
-  protected abstract createNewClient(id: string, heartbeatInterval: number): ClientType;
+  protected abstract createNewClient(id: string, protocol: ProtocolBase, heartbeatInterval: number): ClientType;
   
-  buildClient(id: string, heartbeatInterval:number=1000): ClientType {
-    if (!this.clients.has(id)) this.clients.set(id, this.createNewClient(id, heartbeatInterval));
+  buildClient(id: string, protocol: ProtocolBase, heartbeatInterval:number=1000): ClientType {
+    if (!this.clients.has(id)) this.clients.set(id, this.createNewClient(id, protocol, heartbeatInterval));
     return this.clients.get(id);
   }
   destroyClient(id: string) {
@@ -80,21 +80,23 @@ export abstract class ConnectionBase<ClientType extends ClientBase<any,any>> ext
   load(state: Record<string,any>) {}
 }
 
-export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, ChannelType extends ChannelBase<any>> {
+export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
   readonly id: string;
   readonly conn: ConnectionType;
-  protected readonly channels = new Map<string, ChannelType>();
-  // readonly sender = new Listener<"receive", string>;
+  protected readonly channels = new Map<string, Channel>();
   protected _routerId: string = null;
   
   readonly clients = new Map<string, Map<string, number>>();
   private onConnectCallback: (success: boolean) => void = null;
 
+  readonly protocol: ProtocolBase;
+
   private hasBlockedReconnect: boolean = false;
   readonly subclientDist = new Map<string, {dist: number, client: string}>();
   readonly clientHeartbeats = new Map<string, SmartTimeout>(); // being in this list implies the heartbeat is active
   
-  readonly dmChannel: ChannelType;
+  readonly dmChannel: Channel;
+  private readonly sendQueue = new TimeoutQueue<[msg: string, recipientFunc: () => string]>(5000, (a,b) => a[0] === b[0] && a[1] === b[1] );
 
   readonly listener = new Listener<clientEvents, string>();
   readonly errListener = new Listener<errEvents, { type: string, message: string }>();
@@ -103,13 +105,17 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
 
   readonly hbInterval: SmartInterval;
 
-  constructor(id: string, connection: ConnectionType, heartbeatInterval: number) {
+  constructor(id: string, connection: ConnectionType, protocol: ProtocolBase, heartbeatInterval: number) {
     this.id = id;
     this.conn = connection;
+    this.protocol = protocol;
 
     // this.sender.on("receive", this.onReceive.bind(this));
     this.dmChannel = this.buildChannel(`_${id}`);
-    this.listener.on("receive", this.onReceive.bind(this));
+    this.listener.on("receive", this.protocol.deserialize.bind(this.protocol)); // Forward received data to protocol
+   
+    this.protocol.listener.on("deserialize", this.onReceive.bind(this));          // Once data is deserialized, forward to logic
+    this.protocol.listener.on("serialize", this._doSend.bind(this));
 
     this.hbInterval = new SmartInterval(this.sendHeartbeat.bind(this), heartbeatInterval);
     this.hbInterval.pause(); // don't run until ready
@@ -136,6 +142,9 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     this.errListener.on("unavailable", () => {
       if (this.onConnectCallback) this.onConnectCallback(false);
     });
+
+    this.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
+    this.listener.on("readystatechange", this.onReadyStateChange.bind(this));
   }
 
   // if isReady == this.readyStates.has(id), set this.readyState... to !isReady, then back to isReady
@@ -203,108 +212,114 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   
   abstract connectTo(id: string, callback: (success: boolean) => void ): void; // using callback as a type of promise (kind of...)
   abstract disconnectFrom(id: string): Promise<boolean>;
-
-  abstract createNewChannel(id: string): ChannelType;
+  protected abstract doSend(msg: string, recipientId: string): void;
+  
   buildChannel(id: string) {
-    if (!this.channels.has(id)) this.channels.set(id, this.createNewChannel(id));   
+    if (!this.channels.has(id)) this.channels.set(id, new Channel(id, this));
     return this.channels.get(id);
   }
 
-  protected onReceive(msg: string) {
-    try {
-      const message = JSON.parse(msg) as channelMessage;
+  private _doSend([msg, recipientId]: [ string, string ]) {
+    if (
+      !this.getReadyState(this.id) // client not yet ready to send
+      || recipientId === null // finalRecipient cannot be reached
+      || !this.getReadyState(recipientId) // client cannot yet communicate with 'recipientId'
+    ) {
+      this.sendQueue.add([msg, this.getSendClient.bind(this, recipientId)]); // undefined recipientId indicates to queue that value needs to be generated based on 
+      return;
+    }
 
-      if (!message.header) return; // no header
-      const type = message.header.type as channelSendTypes;
-      const channelId = message.header.channel as string;
+    this.doSend(msg, recipientId);
+  }
 
-      if (!type || !channelId) return; // ignore malformed message
-      
-      const messageData: channelMessageData = {
-        req: {
-          header: message.header,
-          data: message.data,
-          body: this.conn.runMiddleware(message)
-        },
-        res: null
-      };
+  protected onReceive(message: connProtocolReceive) {
+    if (!message.header) return; // no header
+    const type = message.header.type as channelSendTypes;
+    const channelId = message.header.channel as string;
 
-      const tags: string[] = message?.header?.tags?.split(",") ?? [];
-      const origin = message.header.sender?.origin ?? null;
-      if (origin != null) {
-        this.resetHeartbeat(origin);
-      }
+    if (!type || !channelId) return; // ignore malformed message
+    
+    const messageData: channelMessageData = {
+      req: {
+        header: message.header,
+        data: message.data,
+        body: this.conn.runMiddleware(message)
+      },
+      res: null
+    };
 
-      switch (type) {
-        case "control":
-          if (message.header && message.header.recipient != null && message.header.recipient != this.id) return; // Message not intended for this client
-          
-          try { this.handleControl(JSON.parse(message.data), message.header); }
-          catch(err) {} // catch error to not stop program because of malformed message
-          this.dmChannel.listener.trigger("_control", messageData);
-          return;
-        case "send":
-          if (tags.includes("hb")) return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
-          break;
-        case "request":
-          if (!tags.includes("init") || !message?.header?.id || !origin) break; // non-init, or malformed id
+    const tags: string[] = message?.header?.tags?.split(",") ?? [];
+    const origin = message.header.sender?.origin ?? null;
+    if (origin != null) {
+      this.resetHeartbeat(origin);
+    }
+
+    switch (type) {
+      case "control":
+        if (message.header && message.header.recipient != null && message.header.recipient != this.id) return; // Message not intended for this client
+        
+        try { this.handleControl(JSON.parse(message.data), message.header); }
+        catch(err) {} // catch error to not stop program because of malformed message
+        this.dmChannel.listener.trigger("_control", messageData);
+        return;
+      case "send":
+        if (tags.includes("hb")) return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
+        break;
+      case "request":
+        if (!tags.includes("init") || !message?.header?.id || !origin) break; // non-init, or malformed id
+        messageData.res = {
+          send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+        };
+
+        {
+          let oldReadyState = this.getReadyState(origin);
+
+          this.setReadyState(origin, true, false);  // Allow for message to be sent
+          this.dmChannel.sendResponse(message, message.data);
+          this.setReadyState(origin, oldReadyState, false); // Reset ready state
+
+        }
+        return;
+      case "response": 
+      if (!tags.includes("init")) break;
+      this.dmChannel.respond(messageData);
+      return;
+    }
+    
+    // forward to someone who probably knows the final recipient
+    if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
+      this.dmChannel.forward(message);
+      this.dmChannel.listener.trigger("_forward", messageData);
+      return;
+    }
+
+    if (!this.channels.has(channelId)) return; // invalid channel (when it matters)
+
+    const channel = this.channels.get(channelId);
+
+    switch (type) {
+      case "request":
+        if (message?.header?.id) { // only do if non-malformed id
+          // set "response" object of message data
           messageData.res = {
-            send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+            send: channel.sendResponse.bind(channel, message)
           };
 
-          {
-            let oldReadyState = this.getReadyState(origin);
-
-            this.setReadyState(origin, true, false);  // Allow for message to be sent
-            this.dmChannel.sendResponse(message, message.data);
-            this.setReadyState(origin, oldReadyState, false); // Reset ready state
-
+          if (!tags.includes("echo")) channel.listener.trigger("request", messageData); // only trigger if not echo request
+          else {
+            channel.listener.trigger("echoB", messageData);
+            channel.sendResponse(message, message.data);
           }
-          return;
-        case "response": 
-        if (!tags.includes("init")) break;
-        this.dmChannel.respond(messageData);
-        return;
-      }
-      
-      // forward to someone who probably knows the final recipient
-      if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
-        this.dmChannel.forward(message);
-        this.dmChannel.listener.trigger("_forward", messageData);
-        return;
-      }
-
-      if (!this.channels.has(channelId)) return; // invalid channel (when it matters)
-
-      const channel = this.channels.get(channelId);
-
-      switch (type) {
-        case "request":
-          if (message?.header?.id) { // only do if non-malformed id
-            // set "response" object of message data
-            messageData.res = {
-              send: channel.sendResponse.bind(channel, message)
-            };
-
-            if (!tags.includes("echo")) channel.listener.trigger("request", messageData); // only trigger if not echo request
-            else {
-              channel.listener.trigger("echoB", messageData);
-              channel.sendResponse(message, message.data);
-            }
-          }
-          break;
-        case "response":
-          channel.respond(messageData);
-          if (tags.includes("echo")) channel.listener.trigger("echoA", messageData);
-          break;
-        case "send":
-          channel.listener.trigger("message", messageData);
-          if (!("recipient" in message.header) || message.header.recipient == null) this.rebroadcast(message); // recipient doesn't matter
-      }
-      
-      // channel.listener.trigger("all", messageData);
+        }
+        break;
+      case "response":
+        channel.respond(messageData);
+        if (tags.includes("echo")) channel.listener.trigger("echoA", messageData);
+        break;
+      case "send":
+        channel.listener.trigger("message", messageData);
+        if (!("recipient" in message.header) || message.header.recipient == null) this.rebroadcast(message); // recipient doesn't matter
     }
-    catch(err) {}; // ignore malformed message
   }
 
   private handleControl(control: Record<string, any>, header: channelMessage["header"]) {
@@ -467,7 +482,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   }
 
   // returns router and client ids
-  static debug_getStructure(client: ClientBase<any,any>) {
+  static debug_getStructure(client: ClientBase<any>) {
     const id = client.id;
     const clients = Object.keys(Object.fromEntries(client.subclientDist)).join(", ");
 
@@ -509,6 +524,32 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
     }
   }
 
+  private attemptEmptySendQueue() {
+    const toDelete: [msg: string, recipientFunc: () => string][] = [];
+    this.sendQueue.forEach(([msg, recipientFunc]) => {
+      const recipientId = recipientFunc();
+      if (
+        recipientId == null // invalid id
+        || !this.getReadyState(recipientId) // client connection not yet ready
+      ) return; // try again later
+
+      // id is assumed valid
+      toDelete.push([msg,recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
+      this._doSend([msg, recipientId]); // TODO: fix [recipientId] being undefined
+    });
+
+    for (const item of toDelete) { this.sendQueue.delete(item); }
+  }
+
+  private onReadyStateChange(id: string) {
+    if (this.getReadyState(id)) { // ready state set to true
+      this.attemptEmptySendQueue();
+    }
+  }
+
+  pushToSendQueue(msg: string, recipientFunc: () => string) {
+    this.sendQueue.add([msg, recipientFunc]);
+  }
   async destroy() {
     this.routerId = null; // disconnect from router
     
@@ -527,21 +568,17 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>, Cha
   get isDestroyed() { return this._isDestroyed; }
 }
 
-export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
+export class Channel {
   protected readonly requestIds = new Ids();
   protected readonly requestResolves = new Map<number, (msg:channelMessageData) => void>();
   readonly id: string;
-  readonly client: ClientType;
-
-  protected readonly sendQueue = new TimeoutQueue<[msg: string, recipientFunc: () => string]>(5000, (a,b) => a[0] === b[0] && a[1] === b[1] );
+  readonly client: ClientBase<any>;
 
   readonly listener = new Listener<channelEvents, channelMessageData>();
 
-  constructor(id: string, client: ClientType) {
+  constructor(id: string, client: ClientBase<any>) {
     this.id = id;
     this.client = client;
-    this.client.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
-    this.client.listener.on("readystatechange", this.onReadyStateChange.bind(this));
   }
 
   broadcast(data: string, tags: string = "") { // tags in the form of csv
@@ -584,8 +621,6 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     return this.request(data, finalRecipientId, timeout, fullTags);
   }
 
-  protected abstract doSend(msg: string, recipientId: string): void;
-
   // if recipientId is null, will send to ALL
   protected doSendTo(header: channelMessage["header"], data: channelMessage["data"], finalRecipientId: string) {
     if (finalRecipientId === null) {
@@ -610,20 +645,13 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     const recipientId = this.client.getSendClient(finalRecipientId);
     if (path.includes(recipientId)) return; // recipient has already recieved message; don't need to send again
 
-    const msg = this.constructMessageString(header, data);
-    if (
-      !this.client.getReadyState(this.client.id) // client not yet ready to send
-      || recipientId === null // finalRecipient cannot be reached
-      || !this.client.getReadyState(recipientId) // client cannot yet communicate with 'recipientId'
-    ) {
-      this.sendQueue.add([msg, this.client.getSendClient.bind(this.client, finalRecipientId)]); // undefined recipientId indicates to queue that value needs to be generated based on 
-      return;
-    }
-
-    this.doSend(msg, recipientId);
+    const msg = this.constructMessageObject(header, data);
+    this.client.protocol.serialize(msg, recipientId);
   }
 
-  protected constructMessageString(header: channelMessage["header"], data: channelMessage["data"]) {
+
+
+  protected constructMessageObject(header: channelMessage["header"], data: channelMessage["data"]) {
     header = JSON.parse(JSON.stringify(header)); // create copy
     if (!header.sender) header.sender = { origin: null, path: "[]" };
 
@@ -641,10 +669,10 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     if (header.sender.origin == null) header.sender.origin = this.client.id; // set origin if not already
     if (!header.channel) header.channel = this.id;
 
-    return JSON.stringify({
+    return {
       header,
       data
-    });
+    };
   }
 
   private sendToRouter(header: channelMessage["header"], data: channelMessage["data"]) {
@@ -656,20 +684,6 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
       this.doSendTo(header, data, clientId);
     }
   }
-
-  // doSendTo, but stops if current client id already in header.sender.path // aka: useless
-  // protected doForwardTo(header: channelMessage["header"], data: channelMessage["data"], finalRecipientId: string = null) {
-  //   const path = header?.sender?.path ?? null;
-  //   if (path) {
-  //     try {
-  //       const pathArr = JSON.parse(path);
-  //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) console.log("STOP")
-  //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) return; // don't send, as it would be a repeat
-  //     }
-  //     catch(err) {}
-  //   }
-  //   this.doSendTo(header, data, finalRecipientId);
-  // }
 
   forward(message: channelMessage) {
     if (!("header" in message && "data" in message && "recipient" in message.header)) return; // invalid message
@@ -715,28 +729,5 @@ export abstract class ChannelBase<ClientType extends ClientBase<any,any>> {
     const finalRecipient = message.header.sender.origin;
     const tags = message.header.tags ?? "";
     this.doSendTo({ type: "response", id: message.header.id, tags }, data, finalRecipient);
-  }
-
-  private attemptEmptySendQueue() {
-    const toDelete: [msg: string, recipientFunc: () => string][] = [];
-    this.sendQueue.forEach(([msg, recipientFunc]) => {
-      const recipientId = recipientFunc();
-      if (
-        recipientId == null // invalid id
-        || !this.client.getReadyState(recipientId) // client connection not yet ready
-      ) return; // try again later
-
-      // id is assumed valid
-      toDelete.push([msg,recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
-      this.doSend(msg, recipientId); // TODO: fix [recipientId] being undefined
-    });
-
-    for (const item of toDelete) { this.sendQueue.delete(item); }
-  }
-
-  private onReadyStateChange(id: string) {
-    if (this.client.getReadyState(id)) { // ready state set to true
-      this.attemptEmptySendQueue();
-    }
   }
 }

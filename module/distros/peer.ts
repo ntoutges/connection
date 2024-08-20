@@ -1,4 +1,5 @@
-import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { ClientBase, ConnectionBase } from "../connBase.js";
+import { ProtocolBase } from "../protocolBase.js";
 
 export class PeerConnection extends ConnectionBase<PeerClient> {
   readonly Peer: any;
@@ -18,20 +19,20 @@ export class PeerConnection extends ConnectionBase<PeerClient> {
     this.addInitParams({ prefix });
   }
 
-  protected createNewClient(id: string, heartbeatInterval: number): PeerClient { return new PeerClient(id, this, heartbeatInterval); }
+  protected createNewClient(id: string, protocol: ProtocolBase, heartbeatInterval: number): PeerClient { return new PeerClient(id, this, protocol, heartbeatInterval); }
 
   getFullId(id: string) { return this.prefix + id; }
   getLocalId(id: string) { return id.replace(this.prefix, ""); } // strip prefix
 }
 
 type error_t = "browser-incompatible" | "disconnected" | "invalid-id" | "invalid-key" | "network" | "peer-unavailable" | "ssl-unavailable" | "server-error" | "socket-closed" | "unavailable-id" | "webrtc";
-export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
+export class PeerClient extends ClientBase<PeerConnection> {
   readonly peer: any;
   private waitingForPeerOpen: () => void = null;
   private readonly conns = new Map<string,any>(); // maps between client id and peerjs.conn object
 
-  constructor(id: string, connection: PeerConnection, heartbeatInterval: number) {
-    super(id, connection,heartbeatInterval);
+  constructor(id: string, connection: PeerConnection, protocol: ProtocolBase, heartbeatInterval: number) {
+    super(id, connection, protocol, heartbeatInterval);
 
     this.peer = new connection.Peer(this.fullId);
 
@@ -88,8 +89,6 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
     this.toggleReadyStateTo(id, true);
     this.conns.set(id, conn);
   }
-
-  createNewChannel(id: string): PeerChannel { return new PeerChannel(id, this); }
   
   connectTo(id: string, callback: (success: boolean) => void) {
     if (this.getReadyState(this.id)) return this.doConnectTo(id,callback); // already able to connect
@@ -132,11 +131,9 @@ export class PeerClient extends ClientBase<PeerConnection, PeerChannel> {
   protected async destroyClient() {
     this.peer.destroy();
   }
-}
-
-export class PeerChannel extends ChannelBase<PeerClient> {
+   
   protected doSend(msg: string, recipientId: string) {
-    const conn = this.client.getConn(recipientId);
+    const conn = this.getConn(recipientId);
     if (conn) {
       conn.send(msg);
     }

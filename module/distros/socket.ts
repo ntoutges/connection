@@ -1,4 +1,5 @@
-import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { ClientBase, ConnectionBase } from "../connBase.js";
+import { ProtocolBase } from "../protocolBase.js";
 
 export class SocketConnection extends ConnectionBase<SocketClient> {
   readonly socket: any;
@@ -12,15 +13,15 @@ export class SocketConnection extends ConnectionBase<SocketClient> {
     this.socket = socket;
   }
 
-  protected createNewClient(id: string, heartbeatInterval: number) { return new SocketClient(id, this, heartbeatInterval); }
+  protected createNewClient(id: string, protocol: ProtocolBase, heartbeatInterval: number) { return new SocketClient(id, this, protocol, heartbeatInterval); }
 }
 
-export class SocketClient extends ClientBase<SocketConnection, SocketChannel> {
+export class SocketClient extends ClientBase<SocketConnection> {
   readonly socket: any;
   private onSocketConnect: () => void = null;
 
-  constructor(id: string, connection: SocketConnection, heartbeatInterval: number) {
-    super(id, connection, heartbeatInterval);
+  constructor(id: string, connection: SocketConnection, protocol: ProtocolBase, heartbeatInterval: number) {
+    super(id, connection, protocol, heartbeatInterval);
 
     this.socket = connection.socket;
 
@@ -64,14 +65,10 @@ export class SocketClient extends ClientBase<SocketConnection, SocketChannel> {
     return true;
   }
 
-  createNewChannel(id: string): SocketChannel { return new SocketChannel(id, this); }
-
   // Nothing needs to be done to disconnect
   async destroyClient() {}
-}
-
-export class SocketChannel extends ChannelBase<SocketClient> {
+ 
   protected doSend(msg: string, recipientId: string): void {
-    this.client.socket.send(msg);
+    this.socket.send(msg);
   }
 }

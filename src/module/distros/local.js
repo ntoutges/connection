@@ -1,4 +1,4 @@
-import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { ClientBase, ConnectionBase } from "../connBase.js";
 const connWorlds = new Map();
 export class LocalConnection extends ConnectionBase {
     worldId;
@@ -9,18 +9,17 @@ export class LocalConnection extends ConnectionBase {
         if (!connWorlds.has(this.worldId))
             connWorlds.set(this.worldId, new Map());
     }
-    createNewClient(id, heartbeatInterval) {
-        const client = new LocalClient(id, this, heartbeatInterval);
+    createNewClient(id, protocol, heartbeatInterval) {
+        const client = new LocalClient(id, this, protocol, heartbeatInterval);
         connWorlds.get(this.worldId).set(id, client);
         return client;
     }
 }
 export class LocalClient extends ClientBase {
-    constructor(id, connection, heartbeatInterval) {
-        super(id, connection, heartbeatInterval);
+    constructor(id, connection, protocol, heartbeatInterval) {
+        super(id, connection, protocol, heartbeatInterval);
         setTimeout(() => { this.setReadyState(this.id, true); }, 0); // allow other events to happen before running this
     }
-    createNewChannel(id) { return new LocalChannel(id, this); }
     getClient(id) {
         if (this.clients.has(id) || id == this._routerId)
             return this.conn.getClient(id);
@@ -41,17 +40,14 @@ export class LocalClient extends ClientBase {
     async destroyClient() {
         connWorlds.get(this.conn.worldId).delete(this.id);
     }
-}
-export class LocalChannel extends ChannelBase {
     doSend(msg, recipientId) {
-        const recipient = connWorlds.get(this.client.conn.worldId).get(recipientId);
-        if (!recipient) { // no one to send to, so push to queue
-            this.sendQueue.add([msg, () => recipientId]);
-            return;
-        }
+        const recipient = connWorlds.get(this.conn.worldId).get(recipientId);
+        if (!recipient)
+            return; // Ignore
+        // Allow other events to happen before message "sends"
         setTimeout(() => {
             recipient.listener.trigger("receive", msg);
-        }, 1);
+        }, 0);
     }
 }
 //# sourceMappingURL=local.js.map

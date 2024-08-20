@@ -7,9 +7,9 @@ import { TimeoutQueue } from "./timeoutQueue.js";
 export class ConnectionBase extends Saveable {
     clients = new Map();
     middleware = new Map();
-    buildClient(id, heartbeatInterval = 1000) {
+    buildClient(id, protocol, heartbeatInterval = 1000) {
         if (!this.clients.has(id))
-            this.clients.set(id, this.createNewClient(id, heartbeatInterval));
+            this.clients.set(id, this.createNewClient(id, protocol, heartbeatInterval));
         return this.clients.get(id);
     }
     destroyClient(id) {
@@ -46,25 +46,29 @@ export class ClientBase {
     id;
     conn;
     channels = new Map();
-    // readonly sender = new Listener<"receive", string>;
     _routerId = null;
     clients = new Map();
     onConnectCallback = null;
+    protocol;
     hasBlockedReconnect = false;
     subclientDist = new Map();
     clientHeartbeats = new Map(); // being in this list implies the heartbeat is active
     dmChannel;
+    sendQueue = new TimeoutQueue(5000, (a, b) => a[0] === b[0] && a[1] === b[1]);
     listener = new Listener();
     errListener = new Listener();
     readyStates = new Set();
     _isDestroyed = false;
     hbInterval;
-    constructor(id, connection, heartbeatInterval) {
+    constructor(id, connection, protocol, heartbeatInterval) {
         this.id = id;
         this.conn = connection;
+        this.protocol = protocol;
         // this.sender.on("receive", this.onReceive.bind(this));
         this.dmChannel = this.buildChannel(`_${id}`);
-        this.listener.on("receive", this.onReceive.bind(this));
+        this.listener.on("receive", this.protocol.deserialize.bind(this.protocol)); // Forward received data to protocol
+        this.protocol.listener.on("deserialize", this.onReceive.bind(this)); // Once data is deserialized, forward to logic
+        this.protocol.listener.on("serialize", this._doSend.bind(this));
         this.hbInterval = new SmartInterval(this.sendHeartbeat.bind(this), heartbeatInterval);
         this.hbInterval.pause(); // don't run until ready
         this.listener.on("readystatechange", (id) => {
@@ -90,6 +94,8 @@ export class ClientBase {
             if (this.onConnectCallback)
                 this.onConnectCallback(false);
         });
+        this.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
+        this.listener.on("readystatechange", this.onReadyStateChange.bind(this));
     }
     // if isReady == this.readyStates.has(id), set this.readyState... to !isReady, then back to isReady
     toggleReadyStateTo(id, isReady) {
@@ -154,102 +160,106 @@ export class ClientBase {
     }
     buildChannel(id) {
         if (!this.channels.has(id))
-            this.channels.set(id, this.createNewChannel(id));
+            this.channels.set(id, new Channel(id, this));
         return this.channels.get(id);
     }
-    onReceive(msg) {
-        try {
-            const message = JSON.parse(msg);
-            if (!message.header)
-                return; // no header
-            const type = message.header.type;
-            const channelId = message.header.channel;
-            if (!type || !channelId)
-                return; // ignore malformed message
-            const messageData = {
-                req: {
-                    header: message.header,
-                    data: message.data,
-                    body: this.conn.runMiddleware(message)
-                },
-                res: null
-            };
-            const tags = message?.header?.tags?.split(",") ?? [];
-            const origin = message.header.sender?.origin ?? null;
-            if (origin != null) {
-                this.resetHeartbeat(origin);
-            }
-            switch (type) {
-                case "control":
-                    if (message.header && message.header.recipient != null && message.header.recipient != this.id)
-                        return; // Message not intended for this client
-                    try {
-                        this.handleControl(JSON.parse(message.data), message.header);
-                    }
-                    catch (err) { } // catch error to not stop program because of malformed message
-                    this.dmChannel.listener.trigger("_control", messageData);
-                    return;
-                case "send":
-                    if (tags.includes("hb"))
-                        return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
-                    break;
-                case "request":
-                    if (!tags.includes("init") || !message?.header?.id || !origin)
-                        break; // non-init, or malformed id
-                    messageData.res = {
-                        send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
-                    };
-                    {
-                        let oldReadyState = this.getReadyState(origin);
-                        this.setReadyState(origin, true, false); // Allow for message to be sent
-                        this.dmChannel.sendResponse(message, message.data);
-                        this.setReadyState(origin, oldReadyState, false); // Reset ready state
-                    }
-                    return;
-                case "response":
-                    if (!tags.includes("init"))
-                        break;
-                    this.dmChannel.respond(messageData);
-                    return;
-            }
-            // forward to someone who probably knows the final recipient
-            if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
-                this.dmChannel.forward(message);
-                this.dmChannel.listener.trigger("_forward", messageData);
-                return;
-            }
-            if (!this.channels.has(channelId))
-                return; // invalid channel (when it matters)
-            const channel = this.channels.get(channelId);
-            switch (type) {
-                case "request":
-                    if (message?.header?.id) { // only do if non-malformed id
-                        // set "response" object of message data
-                        messageData.res = {
-                            send: channel.sendResponse.bind(channel, message)
-                        };
-                        if (!tags.includes("echo"))
-                            channel.listener.trigger("request", messageData); // only trigger if not echo request
-                        else {
-                            channel.listener.trigger("echoB", messageData);
-                            channel.sendResponse(message, message.data);
-                        }
-                    }
-                    break;
-                case "response":
-                    channel.respond(messageData);
-                    if (tags.includes("echo"))
-                        channel.listener.trigger("echoA", messageData);
-                    break;
-                case "send":
-                    channel.listener.trigger("message", messageData);
-                    if (!("recipient" in message.header) || message.header.recipient == null)
-                        this.rebroadcast(message); // recipient doesn't matter
-            }
-            // channel.listener.trigger("all", messageData);
+    _doSend([msg, recipientId]) {
+        if (!this.getReadyState(this.id) // client not yet ready to send
+            || recipientId === null // finalRecipient cannot be reached
+            || !this.getReadyState(recipientId) // client cannot yet communicate with 'recipientId'
+        ) {
+            this.sendQueue.add([msg, this.getSendClient.bind(this, recipientId)]); // undefined recipientId indicates to queue that value needs to be generated based on 
+            return;
         }
-        catch (err) { }
-        ; // ignore malformed message
+        this.doSend(msg, recipientId);
+    }
+    onReceive(message) {
+        if (!message.header)
+            return; // no header
+        const type = message.header.type;
+        const channelId = message.header.channel;
+        if (!type || !channelId)
+            return; // ignore malformed message
+        const messageData = {
+            req: {
+                header: message.header,
+                data: message.data,
+                body: this.conn.runMiddleware(message)
+            },
+            res: null
+        };
+        const tags = message?.header?.tags?.split(",") ?? [];
+        const origin = message.header.sender?.origin ?? null;
+        if (origin != null) {
+            this.resetHeartbeat(origin);
+        }
+        switch (type) {
+            case "control":
+                if (message.header && message.header.recipient != null && message.header.recipient != this.id)
+                    return; // Message not intended for this client
+                try {
+                    this.handleControl(JSON.parse(message.data), message.header);
+                }
+                catch (err) { } // catch error to not stop program because of malformed message
+                this.dmChannel.listener.trigger("_control", messageData);
+                return;
+            case "send":
+                if (tags.includes("hb"))
+                    return; // hb flag signifies that message is not used for anything, so it can be safely ignored by the rest of the program
+                break;
+            case "request":
+                if (!tags.includes("init") || !message?.header?.id || !origin)
+                    break; // non-init, or malformed id
+                messageData.res = {
+                    send: this.dmChannel.sendResponse.bind(this.dmChannel, message)
+                };
+                {
+                    let oldReadyState = this.getReadyState(origin);
+                    this.setReadyState(origin, true, false); // Allow for message to be sent
+                    this.dmChannel.sendResponse(message, message.data);
+                    this.setReadyState(origin, oldReadyState, false); // Reset ready state
+                }
+                return;
+            case "response":
+                if (!tags.includes("init"))
+                    break;
+                this.dmChannel.respond(messageData);
+                return;
+        }
+        // forward to someone who probably knows the final recipient
+        if ("recipient" in message.header && message.header.recipient != null && message.header.recipient != this.id) {
+            this.dmChannel.forward(message);
+            this.dmChannel.listener.trigger("_forward", messageData);
+            return;
+        }
+        if (!this.channels.has(channelId))
+            return; // invalid channel (when it matters)
+        const channel = this.channels.get(channelId);
+        switch (type) {
+            case "request":
+                if (message?.header?.id) { // only do if non-malformed id
+                    // set "response" object of message data
+                    messageData.res = {
+                        send: channel.sendResponse.bind(channel, message)
+                    };
+                    if (!tags.includes("echo"))
+                        channel.listener.trigger("request", messageData); // only trigger if not echo request
+                    else {
+                        channel.listener.trigger("echoB", messageData);
+                        channel.sendResponse(message, message.data);
+                    }
+                }
+                break;
+            case "response":
+                channel.respond(messageData);
+                if (tags.includes("echo"))
+                    channel.listener.trigger("echoA", messageData);
+                break;
+            case "send":
+                channel.listener.trigger("message", messageData);
+                if (!("recipient" in message.header) || message.header.recipient == null)
+                    this.rebroadcast(message); // recipient doesn't matter
+        }
     }
     handleControl(control, header) {
         if ("client" in control
@@ -424,6 +434,30 @@ export class ClientBase {
             this.clientHeartbeats.delete(id);
         }
     }
+    attemptEmptySendQueue() {
+        const toDelete = [];
+        this.sendQueue.forEach(([msg, recipientFunc]) => {
+            const recipientId = recipientFunc();
+            if (recipientId == null // invalid id
+                || !this.getReadyState(recipientId) // client connection not yet ready
+            )
+                return; // try again later
+            // id is assumed valid
+            toDelete.push([msg, recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
+            this._doSend([msg, recipientId]); // TODO: fix [recipientId] being undefined
+        });
+        for (const item of toDelete) {
+            this.sendQueue.delete(item);
+        }
+    }
+    onReadyStateChange(id) {
+        if (this.getReadyState(id)) { // ready state set to true
+            this.attemptEmptySendQueue();
+        }
+    }
+    pushToSendQueue(msg, recipientFunc) {
+        this.sendQueue.add([msg, recipientFunc]);
+    }
     async destroy() {
         this.routerId = null; // disconnect from router
         const promises = [];
@@ -436,18 +470,15 @@ export class ClientBase {
     }
     get isDestroyed() { return this._isDestroyed; }
 }
-export class ChannelBase {
+export class Channel {
     requestIds = new Ids();
     requestResolves = new Map();
     id;
     client;
-    sendQueue = new TimeoutQueue(5000, (a, b) => a[0] === b[0] && a[1] === b[1]);
     listener = new Listener();
     constructor(id, client) {
         this.id = id;
         this.client = client;
-        this.client.listener.on("subclientadd", this.attemptEmptySendQueue.bind(this));
-        this.client.listener.on("readystatechange", this.onReadyStateChange.bind(this));
     }
     broadcast(data, tags = "") {
         this.doSendTo({ type: "send", recipient: null }, data, null);
@@ -507,17 +538,10 @@ export class ChannelBase {
         const recipientId = this.client.getSendClient(finalRecipientId);
         if (path.includes(recipientId))
             return; // recipient has already recieved message; don't need to send again
-        const msg = this.constructMessageString(header, data);
-        if (!this.client.getReadyState(this.client.id) // client not yet ready to send
-            || recipientId === null // finalRecipient cannot be reached
-            || !this.client.getReadyState(recipientId) // client cannot yet communicate with 'recipientId'
-        ) {
-            this.sendQueue.add([msg, this.client.getSendClient.bind(this.client, finalRecipientId)]); // undefined recipientId indicates to queue that value needs to be generated based on 
-            return;
-        }
-        this.doSend(msg, recipientId);
+        const msg = this.constructMessageObject(header, data);
+        this.client.protocol.serialize(msg, recipientId);
     }
-    constructMessageString(header, data) {
+    constructMessageObject(header, data) {
         header = JSON.parse(JSON.stringify(header)); // create copy
         if (!header.sender)
             header.sender = { origin: null, path: "[]" };
@@ -534,10 +558,10 @@ export class ChannelBase {
             header.sender.origin = this.client.id; // set origin if not already
         if (!header.channel)
             header.channel = this.id;
-        return JSON.stringify({
+        return {
             header,
             data
-        });
+        };
     }
     sendToRouter(header, data) {
         if (this.client.routerId)
@@ -548,19 +572,6 @@ export class ChannelBase {
             this.doSendTo(header, data, clientId);
         }
     }
-    // doSendTo, but stops if current client id already in header.sender.path // aka: useless
-    // protected doForwardTo(header: channelMessage["header"], data: channelMessage["data"], finalRecipientId: string = null) {
-    //   const path = header?.sender?.path ?? null;
-    //   if (path) {
-    //     try {
-    //       const pathArr = JSON.parse(path);
-    //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) console.log("STOP")
-    //       if (Array.isArray(pathArr) && pathArr.includes(this.client.id)) return; // don't send, as it would be a repeat
-    //     }
-    //     catch(err) {}
-    //   }
-    //   this.doSendTo(header, data, finalRecipientId);
-    // }
     forward(message) {
         if (!("header" in message && "data" in message && "recipient" in message.header))
             return; // invalid message
@@ -602,27 +613,6 @@ export class ChannelBase {
         const finalRecipient = message.header.sender.origin;
         const tags = message.header.tags ?? "";
         this.doSendTo({ type: "response", id: message.header.id, tags }, data, finalRecipient);
-    }
-    attemptEmptySendQueue() {
-        const toDelete = [];
-        this.sendQueue.forEach(([msg, recipientFunc]) => {
-            const recipientId = recipientFunc();
-            if (recipientId == null // invalid id
-                || !this.client.getReadyState(recipientId) // client connection not yet ready
-            )
-                return; // try again later
-            // id is assumed valid
-            toDelete.push([msg, recipientFunc]); // remove value from queue, as send is being attempted (and if failed, value will be added automatically again)
-            this.doSend(msg, recipientId); // TODO: fix [recipientId] being undefined
-        });
-        for (const item of toDelete) {
-            this.sendQueue.delete(item);
-        }
-    }
-    onReadyStateChange(id) {
-        if (this.client.getReadyState(id)) { // ready state set to true
-            this.attemptEmptySendQueue();
-        }
     }
 }
 //# sourceMappingURL=connBase.js.map

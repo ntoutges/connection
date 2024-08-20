@@ -1,4 +1,5 @@
-import { ChannelBase, ClientBase, ConnectionBase } from "../connBase.js";
+import { ClientBase, ConnectionBase } from "../connBase.js";
+import { ProtocolBase } from "../protocolBase.js";
 
 const connWorlds = new Map<string, Map<string,LocalClient>>();
 
@@ -15,22 +16,20 @@ export class LocalConnection extends ConnectionBase<LocalClient> {
     this.worldId = worldId;
     if (!connWorlds.has(this.worldId)) connWorlds.set(this.worldId, new Map());
   }
-  protected createNewClient(id: string, heartbeatInterval: number): LocalClient {
-    const client = new LocalClient(id,this, heartbeatInterval);
+  protected createNewClient(id: string, protocol: ProtocolBase, heartbeatInterval: number): LocalClient {
+    const client = new LocalClient(id,this, protocol, heartbeatInterval);
     connWorlds.get(this.worldId).set(id, client);
     return client;
   }
 }
 
-export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
-  constructor(id: string, connection: LocalConnection, heartbeatInterval: number) {
-    super(id, connection, heartbeatInterval);
+export class LocalClient extends ClientBase<LocalConnection> {
+  constructor(id: string, connection: LocalConnection, protocol: ProtocolBase, heartbeatInterval: number) {
+    super(id, connection, protocol, heartbeatInterval);
 
     setTimeout(() => { this.setReadyState(this.id, true); }, 0); // allow other events to happen before running this
   }
   
-  createNewChannel(id: string): LocalChannel { return new LocalChannel(id, this); }
-
   getClient(id: string) {
     if (this.clients.has(id) || id == this._routerId) return this.conn.getClient(id);
     return null;
@@ -53,18 +52,14 @@ export class LocalClient extends ClientBase<LocalConnection, LocalChannel> {
   protected async destroyClient(): Promise<void> {
     connWorlds.get(this.conn.worldId).delete(this.id);
   }
-}
 
-export class LocalChannel extends ChannelBase<LocalClient> {
-  protected doSend(msg: string, recipientId: string) {
-    const recipient = connWorlds.get(this.client.conn.worldId).get(recipientId);
-    if (!recipient) { // no one to send to, so push to queue
-      this.sendQueue.add([msg, () => recipientId]);
-      return;
-    }
+  doSend(msg: string, recipientId: string) {
+    const recipient = connWorlds.get(this.conn.worldId).get(recipientId);
+    if (!recipient) return; // Ignore
 
-    setTimeout(() => { // send, and allow break in call stack
+    // Allow other events to happen before message "sends"
+    setTimeout(() => {
       recipient.listener.trigger("receive", msg);
-    }, 1);
+    }, 0);
   }
 }
