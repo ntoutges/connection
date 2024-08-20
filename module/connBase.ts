@@ -37,7 +37,7 @@ export type channelMessageData = {
 
 export abstract class ConnectionBase<ClientType extends ClientBase<any>> extends Saveable<any> {
   protected readonly clients = new Map<string, ClientType>();
-  protected readonly middleware = new Map<string, (data: channelMessage) => any>()
+  protected readonly middleware = new Map<string, (data: channelMessage) => any>();
 
   protected abstract createNewClient(id: string, protocol: ProtocolBase, heartbeatInterval: number): ClientType;
   
@@ -165,7 +165,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
       if (id != this.id && doTriggerEvent) this.listener.trigger("disconnect", id);
     }
 
-    this.listener.trigger("readystatechange", id);
+    if (doTriggerEvent) this.listener.trigger("readystatechange", id);
   }
   getReadyState(id: string) { return this.readyStates.has(id); }
 
@@ -318,7 +318,7 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
         break;
       case "send":
         channel.listener.trigger("message", messageData);
-        if (!("recipient" in message.header) || message.header.recipient == null) this.rebroadcast(message); // recipient doesn't matter
+        if (!("recipient" in message.header) || message.header.recipient == null) this.dmChannel.forward(message); // recipient doesn't matter
     }
   }
 
@@ -400,44 +400,45 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
     this.hasBlockedReconnect = true;
   }
 
-  private handleSubclientDiscovery(control: Record<string, any>, header: channelMessage["header"]) {
+  private handleSubclientDiscovery(control: Record<string, any>, header?: channelMessage["header"]) {
     const clientId = control.client.id;
-      if (!this.clients.has(clientId)) this.clients.set(clientId, new Map<string, number>());
-      
-      const subclientMap = this.clients.get(clientId);
-      const mode = control.client.mode;
-      const subclientsObj = control.client.subclients as Record<string,number>;
-      
-      let didAdd = false;
-      switch (mode) {
-        case "set":
-          subclientMap.clear(); // empty out
-          subclientMap.set(clientId, 1);
-          // nobreak;
-        case "add":
-          for (const subclientId in subclientsObj) {
-            const distance = subclientsObj[subclientId]+1;
-            if (Number.isNaN(distance) || !Number.isFinite(distance)) continue; // ignore useless values
-            subclientMap.set(subclientId, distance);
-          }
-          didAdd = true;
-          break;
-        case "del":
-          for (const subclientId in subclientsObj) {
-            subclientMap.delete(subclientId);
-          }
-          break;
+    if (!this.clients.has(clientId)) this.clients.set(clientId, new Map<string, number>());
+    
+    const subclientMap = this.clients.get(clientId);
+    const mode = control.client.mode;
+    const subclientsObj = control.client.subclients as Record<string,number>;
+    
+    let didAdd = false;
+    switch (mode) {
+      case "set":
+        subclientMap.clear(); // empty out
+        subclientMap.set(clientId, 1);
+        // nobreak;
+      case "add":
+        for (const subclientId in subclientsObj) {
+          const distance = subclientsObj[subclientId]+1;
+          if (Number.isNaN(distance) || !Number.isFinite(distance)) continue; // ignore useless values
+          subclientMap.set(subclientId, distance);
+        }
+        didAdd = true;
+        break;
+      case "del":
+        for (const subclientId in subclientsObj) {
+          subclientMap.delete(subclientId);
+        }
+        break;
+    }
+
+    this.recalculateMinDist();
+    
+    if (this._routerId) {
+      const forwardedSubclients: Record<string,number> = {};
+      forwardedSubclients[clientId] = 1;
+      for (const subclientId in subclientsObj) {
+        forwardedSubclients[subclientId] = subclientMap.get(subclientId);
       }
 
-      this.recalculateMinDist();
-      
-      if (this._routerId) {
-        const forwardedSubclients: Record<string,number> = {};
-        forwardedSubclients[clientId] = 1;
-        for (const subclientId in subclientsObj) {
-          forwardedSubclients[subclientId] = subclientMap.get(subclientId);
-        }
-
+      if (header) {
         this.dmChannel.sendControlMessage({
           client: {
             id: this.id,
@@ -446,8 +447,9 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
           }
         }, null, header);
       }
+    }
 
-      if (didAdd) this.listener.trigger("subclientadd", "");
+    if (didAdd) this.listener.trigger("subclientadd", "");
   }
 
   protected recalculateMinDist() {
@@ -467,18 +469,6 @@ export abstract class ClientBase<ConnectionType extends ConnectionBase<any>> {
         }
       }
     }
-  }
-
-  protected rebroadcast(message: channelMessage) {
-    let pathArr = [];
-    try {
-      pathArr = JSON.parse(message.header.sender.path);
-    }
-    catch(err){}
-    
-    if (!Array.isArray(pathArr)) pathArr = []; // reset to empty array if not array
-
-    this.dmChannel.forward(message);
   }
 
   // returns router and client ids
@@ -638,6 +628,12 @@ export class Channel {
         header.sender.path = "[]";
         path = [];
       }
+
+      // Invalid path
+      if (!Array.isArray(path)) {
+        header.sender.path = "[]";
+        path = [];
+      }
     }
     
     if (path.includes(finalRecipientId)) return; // recipient has already recieved message; don't need to send again
@@ -687,6 +683,16 @@ export class Channel {
 
   forward(message: channelMessage) {
     if (!("header" in message && "data" in message && "recipient" in message.header)) return; // invalid message
+    
+    let pathArr = [];
+    try { pathArr = JSON.parse(message.header.sender.path); }
+    catch(err){}
+    
+    if (!Array.isArray(pathArr)) pathArr = []; // reset to empty array if not array
+
+    // Already encountered this client when sending; Ignore
+    if (pathArr.includes(this.client.id)) return;
+
     this.doSendTo(message.header, message.data, message.header.recipient);
   }
 

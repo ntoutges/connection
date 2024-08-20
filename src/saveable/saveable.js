@@ -129,12 +129,8 @@ export class Saveable {
                 usedInstances.get(type).get(name).set(root[lastKey], group); // update usedInstances
             }
         }
-        if (typeof root[lastKey] == "function") {
-            if (type !== "+")
-                root[lastKey] = { "$$C": { name: root[lastKey].name, type } }; // class
-            else
-                root[lastKey] = { "$$F": { data: root[lastKey].toString() } }; // type of just "+" indicates stringified construction (function)
-        }
+        if (typeof root[lastKey] == "function")
+            root[lastKey] = { "$$C": { name: root[lastKey].name, type } }; // class
         else if (typeof root[lastKey] == "object") { // instance
             let data = null;
             if (root[lastKey]?.save)
@@ -186,8 +182,6 @@ export class Saveable {
     _objectify(key, obj, builtInstances = null, preload = null) {
         if (key.length < 3 || key.substring(0, 2) != "$$")
             return null; // cannot be objectified
-        if (key[2] == "F")
-            return Function("return " + obj.data)(); // given function
         const { type, name } = obj;
         const loadClass = this.objectRepository.getObject(type, name);
         if (loadClass == null) {

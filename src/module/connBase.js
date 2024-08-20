@@ -117,7 +117,8 @@ export class ClientBase {
             if (id != this.id && doTriggerEvent)
                 this.listener.trigger("disconnect", id);
         }
-        this.listener.trigger("readystatechange", id);
+        if (doTriggerEvent)
+            this.listener.trigger("readystatechange", id);
     }
     getReadyState(id) { return this.readyStates.has(id); }
     set routerId(routerId) {
@@ -360,13 +361,15 @@ export class ClientBase {
             for (const subclientId in subclientsObj) {
                 forwardedSubclients[subclientId] = subclientMap.get(subclientId);
             }
-            this.dmChannel.sendControlMessage({
-                client: {
-                    id: this.id,
-                    mode: mode,
-                    subclients: forwardedSubclients
-                }
-            }, null, header);
+            if (header) {
+                this.dmChannel.sendControlMessage({
+                    client: {
+                        id: this.id,
+                        mode: mode,
+                        subclients: forwardedSubclients
+                    }
+                }, null, header);
+            }
         }
         if (didAdd)
             this.listener.trigger("subclientadd", "");
@@ -387,16 +390,6 @@ export class ClientBase {
                 }
             }
         }
-    }
-    rebroadcast(message) {
-        let pathArr = [];
-        try {
-            pathArr = JSON.parse(message.header.sender.path);
-        }
-        catch (err) { }
-        if (!Array.isArray(pathArr))
-            pathArr = []; // reset to empty array if not array
-        this.dmChannel.forward(message);
     }
     // returns router and client ids
     static debug_getStructure(client) {
@@ -532,6 +525,11 @@ export class Channel {
                 header.sender.path = "[]";
                 path = [];
             }
+            // Invalid path
+            if (!Array.isArray(path)) {
+                header.sender.path = "[]";
+                path = [];
+            }
         }
         if (path.includes(finalRecipientId))
             return; // recipient has already recieved message; don't need to send again
@@ -575,6 +573,16 @@ export class Channel {
     forward(message) {
         if (!("header" in message && "data" in message && "recipient" in message.header))
             return; // invalid message
+        let pathArr = [];
+        try {
+            pathArr = JSON.parse(message.header.sender.path);
+        }
+        catch (err) { }
+        if (!Array.isArray(pathArr))
+            pathArr = []; // reset to empty array if not array
+        // Already encountered this client when sending; Ignore
+        if (pathArr.includes(this.client.id))
+            return;
         this.doSendTo(message.header, message.data, message.header.recipient);
     }
     sendControlMessage(data, finalRecipientId = null, lastHeader) {
